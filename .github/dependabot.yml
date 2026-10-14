@@ -2,15 +2,29 @@ version: 2
 updates:
   - package-ecosystem: "cargo"
     directory: "/"
+    # Discover updates against the current default branch, never against a
+    # stale branch snapshot.
+    target-branch: "main"
     schedule:
       interval: "weekly"
     commit-message:
       prefix: "deps"
     open-pull-requests-limit: 10
+    # Non-breaking updates arrive as one reviewable PR; major/0.x-breaking
+    # bumps stay individual so they can be assessed one by one.
+    groups:
+      cargo-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
   - package-ecosystem: "github-actions"
     directory: "/"
+    target-branch: "main"
     schedule:
       interval: "weekly"
     commit-message:
       prefix: "ci"
     open-pull-requests-limit: 5
+    groups:
+      actions-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
