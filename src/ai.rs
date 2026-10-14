@@ -324,14 +324,14 @@ pub fn build_context(data: &AppData, config_history: &[String], channels: &[Chan
         let mut seen = std::collections::HashSet::new();
         let mut count = 0;
         for url in config_history.iter().rev() {
-            if let Some(ch) = data.url_index.get(url).and_then(|&i| channels.get(i)) {
-                if seen.insert(&ch.name) {
-                    ctx.push_str(&ch.name);
-                    ctx.push('\n');
-                    count += 1;
-                    if count >= 15 {
-                        break;
-                    }
+            if let Some(ch) = data.url_index.get(url).and_then(|&i| channels.get(i))
+                && seen.insert(&ch.name)
+            {
+                ctx.push_str(&ch.name);
+                ctx.push('\n');
+                count += 1;
+                if count >= 15 {
+                    break;
                 }
             }
         }
@@ -757,53 +757,51 @@ pub fn search_epg(data: &AppData, keywords: &[String], now: i64) -> Vec<AiSearch
         let epg_id = find_epg_id(ch, data);
         let mut has_epg_match = false;
 
-        if let Some(ref id) = epg_id {
-            if let Some(programs) = data.epg.get(id) {
-                for prog in programs {
-                    if prog.stop < now - 86400 * 7 {
-                        continue;
-                    }
+        if let Some(ref id) = epg_id
+            && let Some(programs) = data.epg.get(id)
+        {
+            for prog in programs {
+                if prog.stop < now - 86400 * 7 {
+                    continue;
+                }
 
-                    let title_lower = prog.title.to_lowercase();
-                    let desc_lower = prog.desc.to_lowercase();
+                let title_lower = prog.title.to_lowercase();
+                let desc_lower = prog.desc.to_lowercase();
 
-                    let title_hits: u32 = kw_lower
-                        .iter()
-                        .filter(|kw| word_contains(&title_lower, kw))
-                        .count() as u32;
-                    let desc_hits: u32 = kw_lower
-                        .iter()
-                        .filter(|kw| {
-                            !word_contains(&title_lower, kw) && word_contains(&desc_lower, kw)
-                        })
-                        .count() as u32;
+                let title_hits: u32 = kw_lower
+                    .iter()
+                    .filter(|kw| word_contains(&title_lower, kw))
+                    .count() as u32;
+                let desc_hits: u32 = kw_lower
+                    .iter()
+                    .filter(|kw| !word_contains(&title_lower, kw) && word_contains(&desc_lower, kw))
+                    .count() as u32;
 
-                    // A title hit only counts as strong when the keyword is
-                    // distinctive or leads the title; a short common word buried
-                    // in a longer title ("душа" in "Тело и душа") is weak.
-                    let strong_title = kw_lower.iter().any(|kw| {
-                        word_contains(&title_lower, kw)
-                            && (is_distinctive(kw) || leads_title(&title_lower, kw))
+                // A title hit only counts as strong when the keyword is
+                // distinctive or leads the title; a short common word buried
+                // in a longer title ("душа" in "Тело и душа") is weak.
+                let strong_title = kw_lower.iter().any(|kw| {
+                    word_contains(&title_lower, kw)
+                        && (is_distinctive(kw) || leads_title(&title_lower, kw))
+                });
+
+                // Precision gate: a strong title hit, or ≥2 distinct keyword
+                // hits anywhere, so neither a lone generic desc word nor a
+                // common word buried in a title pulls in unrelated programmes.
+                // Title is weighted above desc so title matches sort first.
+                let qualifies = strong_title || (title_hits + desc_hits) >= 2;
+                let score = title_hits * 3 + desc_hits;
+
+                if qualifies {
+                    has_epg_match = true;
+                    results.push(AiSearchResult {
+                        channel_idx: ch_idx,
+                        program: prog.clone(),
+                        channel_name: ch.name.clone(),
+                        score,
+                        is_live: now >= prog.start && now < prog.stop,
+                        has_archive: ch.catchup_days > 0 && prog.stop <= now,
                     });
-
-                    // Precision gate: a strong title hit, or ≥2 distinct keyword
-                    // hits anywhere, so neither a lone generic desc word nor a
-                    // common word buried in a title pulls in unrelated programmes.
-                    // Title is weighted above desc so title matches sort first.
-                    let qualifies = strong_title || (title_hits + desc_hits) >= 2;
-                    let score = title_hits * 3 + desc_hits;
-
-                    if qualifies {
-                        has_epg_match = true;
-                        results.push(AiSearchResult {
-                            channel_idx: ch_idx,
-                            program: prog.clone(),
-                            channel_name: ch.name.clone(),
-                            score,
-                            is_live: now >= prog.start && now < prog.stop,
-                            has_archive: ch.catchup_days > 0 && prog.stop <= now,
-                        });
-                    }
                 }
             }
         }

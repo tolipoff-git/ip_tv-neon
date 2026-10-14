@@ -70,10 +70,6 @@ impl IpcHandle {
         ));
     }
 
-    pub fn quit(&self) {
-        self.send_cmd(r#"{"command":["quit"]}"#.into());
-    }
-
     /// Stop the background IPC task immediately (teardown, before the socket path is reused).
     pub fn abort(&self) {
         self.abort.abort();

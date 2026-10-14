@@ -373,17 +373,17 @@ fn render_radio_panel(f: &mut Frame, app: &App, area: Rect) {
 
     // FALLBACK: If stream metadata is empty (e.g. stripped bad JSON or missing),
     // use the track fetched from the provider API if available.
-    if safe_artist.is_empty() && safe_track.is_empty() && safe_media_title.is_empty() {
-        if let Some(st) = app
+    if safe_artist.is_empty()
+        && safe_track.is_empty()
+        && safe_media_title.is_empty()
+        && let Some(st) = app
             .data
             .radio
             .iter()
             .find(|s| s.title == app.player.radio_station_title)
-        {
-            if let Some(ref t) = st.track {
-                safe_track = sanitize(t);
-            }
-        }
+        && let Some(ref t) = st.track
+    {
+        safe_track = sanitize(t);
     }
 
     let marquee_text = build_marquee_text(
@@ -606,7 +606,7 @@ fn render_detail(f: &mut Frame, app: &mut App, area: Rect) {
     };
     let header = Paragraph::new(vec![
         Line::from(vec![Span::styled(
-            format!(" {}{}", &ch.name, fav_marker),
+            format!(" {}{}", ch.name, fav_marker),
             Style::default().fg(theme).bold(),
         )]),
         Line::from(vec![Span::styled(
@@ -989,48 +989,6 @@ fn render_ai_chat(f: &mut Frame, app: &mut App, area: Rect, theme: Color) {
     f.render_widget(Paragraph::new(hint).fg(Color::DarkGray), bottom_chunks[2]);
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_is_generic_title() {
-        assert!(is_generic_title("playlist.m3u8"));
-        assert!(is_generic_title("PLAYLIST.M3U8"));
-        assert!(is_generic_title("some_file.m3u"));
-        assert!(is_generic_title("another.aac"));
-        assert!(is_generic_title("test.aacp"));
-        assert!(is_generic_title("track.mp3"));
-        assert!(is_generic_title("path/to/stream.mp3"));
-
-        assert!(!is_generic_title("Some Track"));
-        assert!(!is_generic_title("Station Name"));
-        assert!(!is_generic_title(""));
-    }
-
-    #[test]
-    fn test_build_marquee_text_generic_fallback() {
-        // Standard rich metadata works
-        assert_eq!(
-            build_marquee_text("Radio", "Artist", "Song", "playlist.m3u8"),
-            "Radio │ Artist │ Song"
-        );
-
-        // Generic media title is ignored, falling back to station name since track/artist are empty
-        assert_eq!(
-            build_marquee_text("Radio", "", "", "playlist.m3u8"),
-            "Radio"
-        );
-        assert_eq!(build_marquee_text("Radio", "", "", "stream.mp3"), "Radio");
-
-        // Non-generic media title is kept as fallback
-        assert_eq!(
-            build_marquee_text("Radio", "", "", "My Actual Song Title"),
-            "Radio │ My Actual Song Title"
-        );
-    }
-}
-
 /// Renders the updating screen
 fn render_updating(f: &mut Frame, area: Rect) {
     let text = "\n\n  UPDATING DATA...\n  PLEASE WAIT...";
@@ -1381,4 +1339,46 @@ fn render_local_list(f: &mut Frame, app: &mut App, area: Rect, theme: Color) {
         )
         .highlight_style(Style::default().bg(theme).fg(Color::Black).bold());
     f.render_stateful_widget(list, area, &mut app.nav.d_state);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_generic_title() {
+        assert!(is_generic_title("playlist.m3u8"));
+        assert!(is_generic_title("PLAYLIST.M3U8"));
+        assert!(is_generic_title("some_file.m3u"));
+        assert!(is_generic_title("another.aac"));
+        assert!(is_generic_title("test.aacp"));
+        assert!(is_generic_title("track.mp3"));
+        assert!(is_generic_title("path/to/stream.mp3"));
+
+        assert!(!is_generic_title("Some Track"));
+        assert!(!is_generic_title("Station Name"));
+        assert!(!is_generic_title(""));
+    }
+
+    #[test]
+    fn test_build_marquee_text_generic_fallback() {
+        // Standard rich metadata works
+        assert_eq!(
+            build_marquee_text("Radio", "Artist", "Song", "playlist.m3u8"),
+            "Radio │ Artist │ Song"
+        );
+
+        // Generic media title is ignored, falling back to station name since track/artist are empty
+        assert_eq!(
+            build_marquee_text("Radio", "", "", "playlist.m3u8"),
+            "Radio"
+        );
+        assert_eq!(build_marquee_text("Radio", "", "", "stream.mp3"), "Radio");
+
+        // Non-generic media title is kept as fallback
+        assert_eq!(
+            build_marquee_text("Radio", "", "", "My Actual Song Title"),
+            "Radio │ My Actual Song Title"
+        );
+    }
 }
