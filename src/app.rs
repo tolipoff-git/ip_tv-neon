@@ -156,10 +156,8 @@ impl App {
                 dirty = true;
             }
         }
-        if dirty {
-            if let Err(e) = self.config.save() {
-                main_log(&format!("[config] save failed: {e}"));
-            }
+        if dirty && let Err(e) = self.config.save() {
+            main_log(&format!("[config] save failed: {e}"));
         }
     }
 
@@ -230,26 +228,26 @@ impl App {
         let epg_idx = self.nav.epg_state.selected();
         let now = chrono::Utc::now().timestamp();
 
-        if let Some(idx) = epg_idx {
-            if idx < self.detail.programs.len() {
-                let prog_title = self.detail.programs[idx].title.clone();
-                let prog_start = self.detail.programs[idx].start;
-                let prog_stop = self.detail.programs[idx].stop;
-                let is_current = now >= prog_start && now < prog_stop;
-                let is_future = prog_start > now;
+        if let Some(idx) = epg_idx
+            && idx < self.detail.programs.len()
+        {
+            let prog_title = self.detail.programs[idx].title.clone();
+            let prog_start = self.detail.programs[idx].start;
+            let prog_stop = self.detail.programs[idx].stop;
+            let is_current = now >= prog_start && now < prog_stop;
+            let is_future = prog_start > now;
 
-                if is_current || is_future {
-                    self.run_video(&url, &name, &prog_title);
-                } else if ch.catchup_days > 0 {
-                    // lutc = now (live edge), not prog_stop — flussonic catch-up convention.
-                    let archive_url = build_archive_url(&url, prog_start, now);
-                    self.run_video(&archive_url, &name, &prog_title);
-                } else {
-                    self.run_video(&url, &name, &prog_title);
-                }
-                self.config.history_push(&url, &name);
-                return;
+            if is_current || is_future {
+                self.run_video(&url, &name, &prog_title);
+            } else if ch.catchup_days > 0 {
+                // lutc = now (live edge), not prog_stop — flussonic catch-up convention.
+                let archive_url = build_archive_url(&url, prog_start, now);
+                self.run_video(&archive_url, &name, &prog_title);
+            } else {
+                self.run_video(&url, &name, &prog_title);
             }
+            self.config.history_push(&url, &name);
+            return;
         }
 
         self.run_video(&url, &name, "");

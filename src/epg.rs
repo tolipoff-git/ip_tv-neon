@@ -96,62 +96,62 @@ async fn fetch_radio_stations(
     let mut radio_genres = HashSet::new();
     radio_genres.insert("All".to_string());
 
-    if let Ok(r) = client.get(RADIO_API).send().await {
-        if let Ok(j) = r.json::<serde_json::Value>().await {
-            let stations = j["result"]["stations"]
-                .as_array()
-                .or_else(|| j["stations"].as_array());
-            if let Some(st) = stations {
-                for s in st {
-                    let mut genres = Vec::new();
-                    if let Some(gs) = s["genre"].as_array() {
-                        for g in gs {
-                            let g_name =
-                                sanitize_terminal(g["name"].as_str().or(g.as_str()).unwrap_or(""))
-                                    .to_uppercase();
-                            if !g_name.is_empty() {
-                                genres.push(g_name.clone());
-                                radio_genres.insert(g_name);
-                            }
+    if let Ok(r) = client.get(RADIO_API).send().await
+        && let Ok(j) = r.json::<serde_json::Value>().await
+    {
+        let stations = j["result"]["stations"]
+            .as_array()
+            .or_else(|| j["stations"].as_array());
+        if let Some(st) = stations {
+            for s in st {
+                let mut genres = Vec::new();
+                if let Some(gs) = s["genre"].as_array() {
+                    for g in gs {
+                        let g_name =
+                            sanitize_terminal(g["name"].as_str().or(g.as_str()).unwrap_or(""))
+                                .to_uppercase();
+                        if !g_name.is_empty() {
+                            genres.push(g_name.clone());
+                            radio_genres.insert(g_name);
                         }
                     }
-                    let id_str = s["id"].as_i64().unwrap_or(0).to_string();
-
-                    let mut quality_urls = HashMap::new();
-                    quality_urls.insert(
-                        "64".to_string(),
-                        s["stream_64"].as_str().unwrap_or("").to_string(),
-                    );
-                    quality_urls.insert(
-                        "128".to_string(),
-                        s["stream_128"].as_str().unwrap_or("").to_string(),
-                    );
-                    quality_urls.insert(
-                        "320".to_string(),
-                        s["stream_320"].as_str().unwrap_or("").to_string(),
-                    );
-                    quality_urls.insert(
-                        "hls".to_string(),
-                        s["stream_hls"].as_str().unwrap_or("").to_string(),
-                    );
-
-                    radio.push(RadioStation {
-                        id: id_str.clone(),
-                        title: sanitize_terminal(s["title"].as_str().unwrap_or("")),
-                        stream: s["stream_320"]
-                            .as_str()
-                            .filter(|s| !s.is_empty())
-                            .or_else(|| s["stream_128"].as_str().filter(|s| !s.is_empty()))
-                            .or_else(|| s["stream_64"].as_str().filter(|s| !s.is_empty()))
-                            .or_else(|| s["stream_hls"].as_str().filter(|s| !s.is_empty()))
-                            .unwrap_or("")
-                            .into(),
-                        quality_urls,
-                        genres,
-                        provider: "Record".into(),
-                        track: tracks_map.get(&id_str).cloned(),
-                    });
                 }
+                let id_str = s["id"].as_i64().unwrap_or(0).to_string();
+
+                let mut quality_urls = HashMap::new();
+                quality_urls.insert(
+                    "64".to_string(),
+                    s["stream_64"].as_str().unwrap_or("").to_string(),
+                );
+                quality_urls.insert(
+                    "128".to_string(),
+                    s["stream_128"].as_str().unwrap_or("").to_string(),
+                );
+                quality_urls.insert(
+                    "320".to_string(),
+                    s["stream_320"].as_str().unwrap_or("").to_string(),
+                );
+                quality_urls.insert(
+                    "hls".to_string(),
+                    s["stream_hls"].as_str().unwrap_or("").to_string(),
+                );
+
+                radio.push(RadioStation {
+                    id: id_str.clone(),
+                    title: sanitize_terminal(s["title"].as_str().unwrap_or("")),
+                    stream: s["stream_320"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| s["stream_128"].as_str().filter(|s| !s.is_empty()))
+                        .or_else(|| s["stream_64"].as_str().filter(|s| !s.is_empty()))
+                        .or_else(|| s["stream_hls"].as_str().filter(|s| !s.is_empty()))
+                        .unwrap_or("")
+                        .into(),
+                    quality_urls,
+                    genres,
+                    provider: "Record".into(),
+                    track: tracks_map.get(&id_str).cloned(),
+                });
             }
         }
     }
@@ -262,13 +262,13 @@ fn parse_m3u(m3u: &str) -> Vec<Channel> {
             let g = sanitize_terminal(line.trim_start_matches("#EXTGRP:").trim());
             if !g.is_empty() {
                 // EXTGRP can appear before or after EXTINF — apply to last channel if pending
-                if let Some(ch) = channels.last_mut() {
-                    if ch.url.is_empty() {
-                        // Channel was just added by EXTINF but has no URL yet — update its group
-                        ch.group = g.clone();
-                        cur_grp = g;
-                        continue;
-                    }
+                if let Some(ch) = channels.last_mut()
+                    && ch.url.is_empty()
+                {
+                    // Channel was just added by EXTINF but has no URL yet — update its group
+                    ch.group = g.clone();
+                    cur_grp = g;
+                    continue;
                 }
                 pending_grp = Some(g);
             }
@@ -299,12 +299,12 @@ fn parse_m3u(m3u: &str) -> Vec<Channel> {
                 norm_name: normalize(""),
                 catchup_days: rec_days,
             });
-        } else if line.starts_with("http") {
-            if let Some(ch) = channels.last_mut() {
-                ch.url = line.to_string();
-                ch.norm_name = normalize(&ch.name);
-                ch.name_lower = ch.name.to_lowercase();
-            }
+        } else if line.starts_with("http")
+            && let Some(ch) = channels.last_mut()
+        {
+            ch.url = line.to_string();
+            ch.norm_name = normalize(&ch.name);
+            ch.name_lower = ch.name.to_lowercase();
         }
     }
 
@@ -533,50 +533,50 @@ pub fn load_data() -> AppData {
 
 pub async fn fetch_radio_now(client: &reqwest::Client) -> HashMap<String, String> {
     let mut map = HashMap::new();
-    if let Ok(r) = client.get(RADIO_NOW_API).send().await {
-        if let Ok(j) = r.json::<serde_json::Value>().await {
-            // API returns {"result": [...]} or bare [...]
-            let stations = j["result"].as_array().or_else(|| j.as_array());
-            if let Some(st) = stations {
-                for s in st {
-                    let id = s["id"].as_i64().unwrap_or(0).to_string();
-                    let mut artist = s["track"]["artist"]
-                        .as_str()
-                        .unwrap_or("")
-                        .trim()
-                        .to_string();
-                    let mut song = s["track"]["song"].as_str().unwrap_or("").trim().to_string();
+    if let Ok(r) = client.get(RADIO_NOW_API).send().await
+        && let Ok(j) = r.json::<serde_json::Value>().await
+    {
+        // API returns {"result": [...]} or bare [...]
+        let stations = j["result"].as_array().or_else(|| j.as_array());
+        if let Some(st) = stations {
+            for s in st {
+                let id = s["id"].as_i64().unwrap_or(0).to_string();
+                let mut artist = s["track"]["artist"]
+                    .as_str()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let mut song = s["track"]["song"].as_str().unwrap_or("").trim().to_string();
 
-                    // FILTER: Misconfigured RadioRecord stations sometimes return double-encoded JSON
-                    // (a backend response string) in the artist field instead of the actual artist.
-                    if artist.starts_with('{') && artist.ends_with('}') {
-                        if let Ok(j) = serde_json::from_str::<serde_json::Value>(&artist) {
-                            let track_obj = j.get("result").or(j.get("track")).unwrap_or(&j);
-                            let ext_a = track_obj
-                                .get("artist")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            let ext_s = track_obj
-                                .get("song")
-                                .or(track_obj.get("title"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            if !ext_a.is_empty() || !ext_s.is_empty() {
-                                artist = ext_a.to_string();
-                                song = ext_s.to_string();
-                            } else {
-                                artist.clear(); // Clear the junk JSON if we couldn't parse it
-                            }
+                // FILTER: Misconfigured RadioRecord stations sometimes return double-encoded JSON
+                // (a backend response string) in the artist field instead of the actual artist.
+                if artist.starts_with('{') && artist.ends_with('}') {
+                    if let Ok(j) = serde_json::from_str::<serde_json::Value>(&artist) {
+                        let track_obj = j.get("result").or(j.get("track")).unwrap_or(&j);
+                        let ext_a = track_obj
+                            .get("artist")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let ext_s = track_obj
+                            .get("song")
+                            .or(track_obj.get("title"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if !ext_a.is_empty() || !ext_s.is_empty() {
+                            artist = ext_a.to_string();
+                            song = ext_s.to_string();
                         } else {
-                            artist.clear();
+                            artist.clear(); // Clear the junk JSON if we couldn't parse it
                         }
+                    } else {
+                        artist.clear();
                     }
+                }
 
-                    if !artist.is_empty() {
-                        map.insert(id, sanitize_terminal(&format!("{} - {}", artist, song)));
-                    } else if !song.is_empty() {
-                        map.insert(id, sanitize_terminal(&song));
-                    }
+                if !artist.is_empty() {
+                    map.insert(id, sanitize_terminal(&format!("{} - {}", artist, song)));
+                } else if !song.is_empty() {
+                    map.insert(id, sanitize_terminal(&song));
                 }
             }
         }
@@ -587,10 +587,10 @@ pub async fn fetch_radio_now(client: &reqwest::Client) -> HashMap<String, String
 // ─── EPG Lookup Helpers ──────────────────────────────────────────────────────
 
 pub fn find_epg_id(ch: &Channel, data: &AppData) -> Option<String> {
-    if let Some(id) = &ch.tvg_id {
-        if data.epg.contains_key(id) {
-            return Some(id.clone());
-        }
+    if let Some(id) = &ch.tvg_id
+        && data.epg.contains_key(id)
+    {
+        return Some(id.clone());
     }
     data.name_to_id.get(&ch.norm_name).cloned()
 }

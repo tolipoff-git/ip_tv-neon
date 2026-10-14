@@ -1,7 +1,7 @@
 // ─── Imports ─────────────────────────────────────────────────────────────────
 
-use anyhow::Result;
 use crate::utils::main_log;
+use anyhow::Result;
 use crossterm::{
     event::{self, DisableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
@@ -156,19 +156,19 @@ async fn main() -> Result<()> {
 
 /// Checks if the background MPV player has exited and cleans up IPC state.
 fn handle_mpv_exit(app: &mut App) {
-    if let Some(ref mut child) = app.player.mpv_handle {
-        if let Ok(Some(_)) = child.try_wait() {
-            app.player.mpv_handle = None;
-            if let Some(ipc) = app.player.radio_ipc.take() {
-                ipc.abort();
-            }
-            *app.player
-                .radio_state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = mpv_ipc::RadioState::default();
-            app.player.radio_station_title.clear();
-            app.needs_redraw = true;
+    if let Some(ref mut child) = app.player.mpv_handle
+        && let Ok(Some(_)) = child.try_wait()
+    {
+        app.player.mpv_handle = None;
+        if let Some(ipc) = app.player.radio_ipc.take() {
+            ipc.abort();
         }
+        *app.player
+            .radio_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = mpv_ipc::RadioState::default();
+        app.player.radio_station_title.clear();
+        app.needs_redraw = true;
     }
 }
 
@@ -187,21 +187,21 @@ async fn handle_radio_fetch(
         let client = http_client.clone();
         *radio_task = Some(tokio::spawn(async move { fetch_radio_now(&client).await }));
     }
-    if radio_task.as_ref().is_some_and(|t| t.is_finished()) {
-        if let Some(task) = radio_task.take() {
-            match task.await {
-                Ok(tracks) => {
-                    for st in &mut app.data.radio {
-                        if let Some(t) = tracks.get(&st.id) {
-                            st.track = Some(t.clone());
-                        }
+    if radio_task.as_ref().is_some_and(|t| t.is_finished())
+        && let Some(task) = radio_task.take()
+    {
+        match task.await {
+            Ok(tracks) => {
+                for st in &mut app.data.radio {
+                    if let Some(t) = tracks.get(&st.id) {
+                        st.track = Some(t.clone());
                     }
-                    app.needs_redraw = true;
                 }
-                Err(e) => {
-                    main_log(&format!("[radio] track fetch task crashed: {e}"));
-                    *radio_tracks_dirty = true; // retry on next tick
-                }
+                app.needs_redraw = true;
+            }
+            Err(e) => {
+                main_log(&format!("[radio] track fetch task crashed: {e}"));
+                *radio_tracks_dirty = true; // retry on next tick
             }
         }
     }
@@ -215,41 +215,41 @@ async fn handle_ai_task(
     app: &mut App,
     ai_task: &mut Option<tokio::task::JoinHandle<ai::AiChatResponse>>,
 ) {
-    if ai_task.as_ref().is_some_and(|t| t.is_finished()) {
-        if let Some(task) = ai_task.take() {
-            match task.await {
-                Ok(response) => {
-                    app.ai.chat_history.push(ai::ChatMsg {
-                        is_user: false,
-                        text: response.text,
+    if ai_task.as_ref().is_some_and(|t| t.is_finished())
+        && let Some(task) = ai_task.take()
+    {
+        match task.await {
+            Ok(response) => {
+                app.ai.chat_history.push(ai::ChatMsg {
+                    is_user: false,
+                    text: response.text,
+                });
+                // Cap chat history to prevent unbounded memory growth
+                const MAX_CHAT_HISTORY: usize = 100;
+                if app.ai.chat_history.len() > MAX_CHAT_HISTORY {
+                    app.ai
+                        .chat_history
+                        .drain(0..app.ai.chat_history.len() - MAX_CHAT_HISTORY);
+                }
+                if let Some(ref kw) = response.keywords {
+                    let now = chrono::Utc::now().timestamp();
+                    app.ai.results = ai::search_epg(&app.data, kw, now);
+                    app.nav.ai_state.select(if app.ai.results.is_empty() {
+                        None
+                    } else {
+                        Some(0)
                     });
-                    // Cap chat history to prevent unbounded memory growth
-                    const MAX_CHAT_HISTORY: usize = 100;
-                    if app.ai.chat_history.len() > MAX_CHAT_HISTORY {
-                        app.ai
-                            .chat_history
-                            .drain(0..app.ai.chat_history.len() - MAX_CHAT_HISTORY);
+                    if !app.ai.results.is_empty() {
+                        app.ai.focus_results = true;
                     }
-                    if let Some(ref kw) = response.keywords {
-                        let now = chrono::Utc::now().timestamp();
-                        app.ai.results = ai::search_epg(&app.data, kw, now);
-                        app.nav.ai_state.select(if app.ai.results.is_empty() {
-                            None
-                        } else {
-                            Some(0)
-                        });
-                        if !app.ai.results.is_empty() {
-                            app.ai.focus_results = true;
-                        }
-                    }
-                    app.ai.loading = false;
-                    app.needs_redraw = true;
                 }
-                Err(e) => {
-                    app.ai.loading = false;
-                    app.status_msg = Some(format!("AI task failed: {}", e));
-                    app.needs_redraw = true;
-                }
+                app.ai.loading = false;
+                app.needs_redraw = true;
+            }
+            Err(e) => {
+                app.ai.loading = false;
+                app.status_msg = Some(format!("AI task failed: {}", e));
+                app.needs_redraw = true;
             }
         }
     }
@@ -268,26 +268,26 @@ async fn handle_update_task(
             async move { update_data(&config, &client).await },
         ));
     }
-    if update_task.as_ref().is_some_and(|t| t.is_finished()) {
-        if let Some(task) = update_task.take() {
-            match task.await {
-                Ok(Ok(())) => {
-                    app.reload_data();
-                    let ch = app.data.channels.len();
-                    let rd = app.data.radio.len();
-                    let epg = app.data.epg.len();
-                    app.status_msg = Some(format!("Updated: {} ch, {} radio, {} EPG", ch, rd, epg));
-                }
-                Ok(Err(e)) => {
-                    app.status_msg = Some(format!("Update failed: {}", e));
-                }
-                Err(e) => {
-                    app.status_msg = Some(format!("Update task panic: {}", e));
-                }
+    if update_task.as_ref().is_some_and(|t| t.is_finished())
+        && let Some(task) = update_task.take()
+    {
+        match task.await {
+            Ok(Ok(())) => {
+                app.reload_data();
+                let ch = app.data.channels.len();
+                let rd = app.data.radio.len();
+                let epg = app.data.epg.len();
+                app.status_msg = Some(format!("Updated: {} ch, {} radio, {} EPG", ch, rd, epg));
             }
-            app.screen = Screen::MainMenu;
-            app.needs_redraw = true;
+            Ok(Err(e)) => {
+                app.status_msg = Some(format!("Update failed: {}", e));
+            }
+            Err(e) => {
+                app.status_msg = Some(format!("Update task panic: {}", e));
+            }
         }
+        app.screen = Screen::MainMenu;
+        app.needs_redraw = true;
     }
 }
 
@@ -308,10 +308,10 @@ async fn handle_input_event(
                             KeyCode::Down => nav_down(&mut app.nav.ai_state, app.ai.results.len()),
                             KeyCode::Enter => app.ai_play_selected(),
                             KeyCode::Char('d') => {
-                                if let Some(idx) = app.nav.ai_state.selected() {
-                                    if idx < app.ai.results.len() {
-                                        app.open_detail(app.ai.results[idx].channel_idx);
-                                    }
+                                if let Some(idx) = app.nav.ai_state.selected()
+                                    && idx < app.ai.results.len()
+                                {
+                                    app.open_detail(app.ai.results[idx].channel_idx);
                                 }
                             }
                             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -343,7 +343,7 @@ async fn handle_input_event(
                                     && !app.ai.loading
                                     && ai_task.is_none() =>
                             {
-                                let msg = app.ai.query.drain(..).collect::<String>();
+                                let msg = std::mem::take(&mut app.ai.query);
                                 app.ai.chat_history.push(ai::ChatMsg {
                                     is_user: true,
                                     text: msg.clone(),
@@ -615,13 +615,13 @@ fn handle_cat_list_input(app: &mut App, code: KeyCode) {
         KeyCode::Up => nav_up(&mut app.nav.cat_state, app.data.groups.len()),
         KeyCode::Down => nav_down(&mut app.nav.cat_state, app.data.groups.len()),
         KeyCode::Enter => {
-            if let Some(idx) = app.nav.cat_state.selected() {
-                if idx < app.data.groups.len() {
-                    app.nav.selected_group = app.data.groups[idx].clone();
-                    app.nav.search.clear();
-                    app.update_filter();
-                    app.screen = Screen::ChanList;
-                }
+            if let Some(idx) = app.nav.cat_state.selected()
+                && idx < app.data.groups.len()
+            {
+                app.nav.selected_group = app.data.groups[idx].clone();
+                app.nav.search.clear();
+                app.update_filter();
+                app.screen = Screen::ChanList;
             }
         }
         KeyCode::Esc => app.screen = Screen::MainMenu,
@@ -634,25 +634,25 @@ fn handle_chan_list_input(app: &mut App, code: KeyCode) {
         KeyCode::Up => nav_up(&mut app.nav.ch_state, app.nav.filtered.len()),
         KeyCode::Down => nav_down(&mut app.nav.ch_state, app.nav.filtered.len()),
         KeyCode::Enter => {
-            if let Some(idx) = app.nav.ch_state.selected() {
-                if idx < app.nav.filtered.len() {
-                    app.open_detail(app.nav.filtered[idx]);
-                }
+            if let Some(idx) = app.nav.ch_state.selected()
+                && idx < app.nav.filtered.len()
+            {
+                app.open_detail(app.nav.filtered[idx]);
             }
         }
         // Favorite toggle: uppercase 'F' always, lowercase 'f' only when the
         // search box is empty — otherwise 'f' must reach the search text buffer.
         KeyCode::Char(c @ ('f' | 'F')) if c == 'F' || app.nav.search.is_empty() => {
-            if let Some(idx) = app.nav.ch_state.selected() {
-                if idx < app.nav.filtered.len() {
-                    let ch = &app.data.channels[app.nav.filtered[idx]];
-                    let url = ch.url.clone();
-                    let name = ch.name.clone();
-                    if app.config.favorites.contains(&url) {
-                        app.config.favorite_remove(&url);
-                    } else {
-                        app.config.favorite_add(&url, &name);
-                    }
+            if let Some(idx) = app.nav.ch_state.selected()
+                && idx < app.nav.filtered.len()
+            {
+                let ch = &app.data.channels[app.nav.filtered[idx]];
+                let url = ch.url.clone();
+                let name = ch.name.clone();
+                if app.config.favorites.contains(&url) {
+                    app.config.favorite_remove(&url);
+                } else {
+                    app.config.favorite_add(&url, &name);
                 }
             }
         }
@@ -677,12 +677,12 @@ fn handle_radio_cat_list_input(app: &mut App, code: KeyCode) {
         KeyCode::Up => nav_up(&mut app.nav.r_cat_state, app.data.radio_groups.len()),
         KeyCode::Down => nav_down(&mut app.nav.r_cat_state, app.data.radio_groups.len()),
         KeyCode::Enter => {
-            if let Some(idx) = app.nav.r_cat_state.selected() {
-                if idx < app.data.radio_groups.len() {
-                    app.nav.selected_radio_genre = app.data.radio_groups[idx].clone();
-                    app.update_radio_filter();
-                    app.screen = Screen::RadioList;
-                }
+            if let Some(idx) = app.nav.r_cat_state.selected()
+                && idx < app.data.radio_groups.len()
+            {
+                app.nav.selected_radio_genre = app.data.radio_groups[idx].clone();
+                app.update_radio_filter();
+                app.screen = Screen::RadioList;
             }
         }
         KeyCode::Esc => app.screen = Screen::MainMenu,
@@ -695,31 +695,31 @@ fn handle_radio_list_input(app: &mut App, code: KeyCode) {
         KeyCode::Up => nav_up(&mut app.nav.r_state, app.nav.filtered_radio.len()),
         KeyCode::Down => nav_down(&mut app.nav.r_state, app.nav.filtered_radio.len()),
         KeyCode::Enter => {
-            if let Some(idx) = app.nav.r_state.selected() {
-                if idx < app.nav.filtered_radio.len() {
-                    let (url, title, track) = {
-                        let st = &app.data.radio[app.nav.filtered_radio[idx]];
-                        (
-                            st.stream.clone(),
-                            st.title.clone(),
-                            st.track.clone().unwrap_or_default(),
-                        )
-                    };
-                    app.run_radio(&url, &title, &track);
-                }
+            if let Some(idx) = app.nav.r_state.selected()
+                && idx < app.nav.filtered_radio.len()
+            {
+                let (url, title, track) = {
+                    let st = &app.data.radio[app.nav.filtered_radio[idx]];
+                    (
+                        st.stream.clone(),
+                        st.title.clone(),
+                        st.track.clone().unwrap_or_default(),
+                    )
+                };
+                app.run_radio(&url, &title, &track);
             }
         }
         KeyCode::Char('f' | 'F') => {
-            if let Some(idx) = app.nav.r_state.selected() {
-                if idx < app.nav.filtered_radio.len() {
-                    let st = &app.data.radio[app.nav.filtered_radio[idx]];
-                    let url = st.stream.clone();
-                    let name = st.title.clone();
-                    if app.config.favorites.contains(&url) {
-                        app.config.favorite_remove(&url);
-                    } else {
-                        app.config.favorite_add(&url, &name);
-                    }
+            if let Some(idx) = app.nav.r_state.selected()
+                && idx < app.nav.filtered_radio.len()
+            {
+                let st = &app.data.radio[app.nav.filtered_radio[idx]];
+                let url = st.stream.clone();
+                let name = st.title.clone();
+                if app.config.favorites.contains(&url) {
+                    app.config.favorite_remove(&url);
+                } else {
+                    app.config.favorite_add(&url, &name);
                 }
             }
         }
@@ -849,11 +849,11 @@ fn diag() -> Result<()> {
     println!("Cache:  {}", consts::get_data_bin_path().display());
     println!("Config exists: {}", consts::get_config_json_path().exists());
     println!("Cache exists:  {}", consts::get_data_bin_path().exists());
-    if let Ok(raw) = std::fs::read_to_string(consts::get_config_json_path()) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
-            println!("Playlist: {}", v["playlist_url"].as_str().unwrap_or("N/A"));
-            println!("EPG URL:  {}", v["epg_url"].as_str().unwrap_or("N/A"));
-        }
+    if let Ok(raw) = std::fs::read_to_string(consts::get_config_json_path())
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw)
+    {
+        println!("Playlist: {}", v["playlist_url"].as_str().unwrap_or("N/A"));
+        println!("EPG URL:  {}", v["epg_url"].as_str().unwrap_or("N/A"));
     }
     Ok(())
 }
@@ -866,13 +866,13 @@ fn switch_playing_channel(app: &mut App, up: bool) {
             } else {
                 nav_down(&mut app.nav.ch_state, app.nav.filtered.len());
             }
-            if let Some(idx) = app.nav.ch_state.selected() {
-                if idx < app.nav.filtered.len() {
-                    let ch = &app.data.channels[app.nav.filtered[idx]];
-                    let url = ch.url.clone();
-                    let name = ch.name.clone();
-                    app.run_video(&url, &name, "");
-                }
+            if let Some(idx) = app.nav.ch_state.selected()
+                && idx < app.nav.filtered.len()
+            {
+                let ch = &app.data.channels[app.nav.filtered[idx]];
+                let url = ch.url.clone();
+                let name = ch.name.clone();
+                app.run_video(&url, &name, "");
             }
         }
         Screen::RadioList => {
@@ -881,14 +881,14 @@ fn switch_playing_channel(app: &mut App, up: bool) {
             } else {
                 nav_down(&mut app.nav.r_state, app.nav.filtered_radio.len());
             }
-            if let Some(idx) = app.nav.r_state.selected() {
-                if idx < app.nav.filtered_radio.len() {
-                    let st = &app.data.radio[app.nav.filtered_radio[idx]];
-                    let url = st.stream.clone();
-                    let name = st.title.clone();
-                    let track = st.track.clone().unwrap_or_default();
-                    app.run_radio(&url, &name, &track);
-                }
+            if let Some(idx) = app.nav.r_state.selected()
+                && idx < app.nav.filtered_radio.len()
+            {
+                let st = &app.data.radio[app.nav.filtered_radio[idx]];
+                let url = st.stream.clone();
+                let name = st.title.clone();
+                let track = st.track.clone().unwrap_or_default();
+                app.run_radio(&url, &name, &track);
             }
         }
         Screen::Favorites => {
@@ -912,12 +912,12 @@ fn switch_playing_channel(app: &mut App, up: bool) {
             } else {
                 nav_down(&mut app.nav.hist_state, app.config.history.len());
             }
-            if let Some(idx) = app.nav.hist_state.selected() {
-                if idx < app.config.history.len() {
-                    let url = app.config.history[idx].clone();
-                    let name = crate::ui::get_name_by_url(&url, &app.data, &app.config).to_string();
-                    app.run_video(&url, &name, "");
-                }
+            if let Some(idx) = app.nav.hist_state.selected()
+                && idx < app.config.history.len()
+            {
+                let url = app.config.history[idx].clone();
+                let name = crate::ui::get_name_by_url(&url, &app.data, &app.config).to_string();
+                app.run_video(&url, &name, "");
             }
         }
         _ => {}
