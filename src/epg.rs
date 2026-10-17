@@ -198,6 +198,39 @@ async fn fetch_radio_stations(
     (radio, radio_genres)
 }
 
+/// Reject a playlist body that is clearly not an M3U list — e.g. the HTML page
+/// a web server happily returns with HTTP 200 for an unknown path. Without this
+/// a mistyped URL parses to zero channels and silently wipes the saved list;
+/// the error below names the real cause instead.
+///
+/// The URL is deliberately not echoed: player playlist URLs often embed the
+/// provider's account token.
+fn validate_playlist_body(body: &str) -> Result<()> {
+    // A UTF-8 BOM and leading blank lines are legal before the #EXTM3U header.
+    let head = body.trim_start_matches('\u{feff}').trim_start();
+    if head.to_ascii_lowercase().starts_with("#extm3u")
+        || body
+            .lines()
+            .any(|l| l.trim_start().to_ascii_lowercase().starts_with("#extinf"))
+    {
+        return Ok(());
+    }
+    let sniff: String = head
+        .chars()
+        .take(64)
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let kind = if head.starts_with('<') {
+        "an HTML/XML page"
+    } else {
+        "unrecognized content"
+    };
+    anyhow::bail!(
+        "playlist is not an M3U list — it looks like {kind} (starts with {:?}); check that the URL points at a playlist, not a site root",
+        sniff.trim()
+    )
+}
+
 /// Fetch and parse the main IPTV playlist
 async fn fetch_playlist(client: &reqwest::Client, config: &Config) -> Result<Vec<Channel>> {
     let m3u = if config.playlist_url.starts_with("http") {
@@ -206,14 +239,34 @@ async fn fetch_playlist(client: &reqwest::Client, config: &Config) -> Result<Vec
             .send()
             .await
             .context("Failed to fetch playlist")?;
+
+        if !resp.status().is_success() {
+            anyhow::bail!("playlist server replied HTTP {}", resp.status());
+        }
+        // Catch an HTML answer before downloading it just to reject it.
+        if let Some(ct) = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .filter(|ct| ct.to_ascii_lowercase().contains("html"))
+        {
+            anyhow::bail!(
+                "playlist URL returned Content-Type {ct:?} — that is a web page, not an M3U list"
+            );
+        }
+
         let bytes = read_body_capped(resp, MAX_PLAYLIST_BYTES, "playlist").await?;
-        String::from_utf8_lossy(&bytes).into_owned()
+        let body = String::from_utf8_lossy(&bytes).into_owned();
+        validate_playlist_body(&body)?;
+        body
     } else {
         let path = config.playlist_url.clone();
-        tokio::task::spawn_blocking(move || fs::read_to_string(&path))
+        let body = tokio::task::spawn_blocking(move || fs::read_to_string(&path))
             .await
             .map_err(|e| anyhow::anyhow!("spawn_blocking join: {e}"))?
-            .context("Failed to read local playlist")?
+            .context("Failed to read local playlist")?;
+        validate_playlist_body(&body)?;
+        body
     };
 
     Ok(parse_m3u(&m3u))
@@ -639,7 +692,7 @@ pub fn scan_local_playlists(custom_dir: &str) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_epg, parse_m3u};
+    use super::{parse_epg, parse_m3u, validate_playlist_body};
 
     // ── M3U ──────────────────────────────────────────────────────────────
 
@@ -707,6 +760,43 @@ http://host/movies
         assert_eq!(chans.len(), 1);
         // splitn(2, ',') keeps the full name after the first comma
         assert_eq!(chans[0].name, "Movies, HD Collection");
+    }
+
+    // ── Playlist body validation ─────────────────────────────────────────
+
+    #[test]
+    fn playlist_html_page_is_rejected_with_cause() {
+        // A SPA/site root answers 200 with HTML; the message must say so
+        // instead of reporting an empty channel list.
+        let html = "<!DOCTYPE html>\n<html><head><title>Dispatcharr</title></head></html>";
+        let err = validate_playlist_body(html).unwrap_err().to_string();
+        assert!(err.contains("HTML/XML page"), "{err}");
+        assert!(err.contains("<!DOCTYPE html>"), "{err}");
+    }
+
+    #[test]
+    fn playlist_accepts_header_extinf_and_bom() {
+        assert!(validate_playlist_body("#EXTM3U\n#EXTINF:-1,A\nhttp://h/a").is_ok());
+        assert!(validate_playlist_body("\u{feff}\n\n#EXTM3U\n").is_ok());
+        // A list without the #EXTM3U header is still valid when it has EXTINF.
+        assert!(validate_playlist_body("#EXTINF:-1,A\nhttp://h/a").is_ok());
+    }
+
+    #[test]
+    fn playlist_rejects_empty_and_unrecognized_bodies() {
+        assert!(validate_playlist_body("").is_err());
+        assert!(validate_playlist_body("\n\n").is_err());
+        assert!(validate_playlist_body("Not Found").is_err());
+        assert!(validate_playlist_body("{\"detail\":\"No User matches\"}").is_err());
+    }
+
+    #[test]
+    fn playlist_error_message_is_single_line_for_control_bytes() {
+        // Control characters must not smuggle terminal escapes into the UI.
+        let err = validate_playlist_body("\u{1b}[31m<html>")
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains('\u{1b}'), "{err:?}");
     }
 
     // ── XMLTV EPG ────────────────────────────────────────────────────────
