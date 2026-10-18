@@ -24,6 +24,16 @@ rejected in the editor with the reason, so a typo can't silently break the next 
 
 ---
 
+### Where is the list of keyboard shortcuts?
+
+Press **`F1`** (or **`?`**) on any screen, or choose **Main Menu → ❓ Help**. The overlay groups the keys by screen and
+scrolls with `↑↓` / `PgUp` / `PgDn` / `Home` / `End`; `Esc` / `Enter` / `F1` / `?` close it and return you to the
+screen you came from. `?` is not intercepted where it would be typed as text (channel filter, settings editor,
+AI chat) — `F1` always works. The reference is generated from `src/help.rs`, one table, so it stays in sync with the
+handlers.
+
+---
+
 ### Nothing shows up after I set the URLs. Why?
 
 The TUI reads from the cache (`data.bin`); the cache is only filled by **Update**. Run Main Menu → 🔄 Update (or

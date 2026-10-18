@@ -48,6 +48,8 @@ pub struct NavState {
     pub set_state: ListState,
     /// First visible line index of the settings list (manual scroll).
     pub set_offset: usize,
+    /// First visible line index of the help screen (manual scroll).
+    pub help_offset: usize,
     pub epg_state: ListState,
     pub ai_state: ListState,
     pub filtered: Vec<usize>,
@@ -106,6 +108,8 @@ pub struct App {
     pub cache_meta: Option<CacheMeta>,
     /// True when a source URL changed after the last successful update.
     pub needs_source_update: bool,
+    /// Screen to return to when the help overlay closes.
+    pub help_return: Screen,
 }
 
 /// Accept only http/https media URLs (CG4). Case-insensitive on the scheme.
@@ -163,6 +167,7 @@ impl App {
             confirm: None,
             cache_meta: CacheMeta::load(),
             needs_source_update: false,
+            help_return: Screen::MainMenu,
         };
         app.nav.m_state.select(Some(0));
         app.nav.cat_state.select(Some(0));
@@ -219,6 +224,26 @@ impl App {
         if dirty && let Err(e) = self.config.save() {
             main_log(&format!("[config] save failed: {e}"));
         }
+    }
+
+    // ─── Help overlay ────────────────────────────────────────────────────
+
+    /// Toggle the key-reference overlay, remembering where to return.
+    pub fn toggle_help(&mut self) {
+        if self.screen == Screen::Help {
+            self.close_help();
+        } else {
+            self.help_return = self.screen;
+            self.nav.help_offset = 0;
+            self.screen = Screen::Help;
+        }
+    }
+
+    pub fn close_help(&mut self) {
+        self.screen = match self.help_return {
+            Screen::Help => Screen::MainMenu,
+            other => other,
+        };
     }
 
     // ─── Stable entry keys (favorites / history) ─────────────────────────

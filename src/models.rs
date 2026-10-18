@@ -649,6 +649,7 @@ pub enum Screen {
     History,
     AiChat,
     Confirm,
+    Help,
 }
 
 pub const THEME_PRESETS: &[(u8, u8, u8, &str)] = &[

@@ -2,6 +2,7 @@
 
 use crate::app::App;
 use crate::epg::get_current_epg;
+use crate::help::HELP;
 use crate::models::Screen;
 use crate::player::VU_BARS;
 use crate::settings::{SETTINGS, SettingKind};
@@ -221,6 +222,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         Screen::LocalList => render_local_list(f, app, content_area, theme),
         Screen::Detail => render_detail(f, app, content_area),
         Screen::AiChat => render_ai_chat(f, app, content_area, theme),
+        Screen::Help => render_help(f, app, content_area, theme),
         Screen::Confirm => {
             let back = app
                 .confirm
@@ -229,6 +231,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 .unwrap_or(Screen::MainMenu);
             match back {
                 Screen::Settings => render_settings(f, app, content_area, None),
+                Screen::Help => render_help(f, app, content_area, theme),
                 _ => render_main_menu(f, app, content_area, theme),
             }
             render_confirm(f, app, full_area);
@@ -920,6 +923,49 @@ fn render_settings(f: &mut Frame, app: &mut App, area: Rect, editing: Option<usi
     );
 }
 
+/// Key-reference overlay (Main Menu → ❓ Help, or F1 / ? anywhere).
+fn render_help(f: &mut Frame, app: &mut App, area: Rect, theme: Color) {
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, section) in HELP.iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(Span::styled(
+            format!(" {}", section.title),
+            Style::default().fg(theme).bold(),
+        )));
+        for (key, action) in section.rows {
+            lines.push(Line::from(vec![
+                Span::styled(format!("   {key:<24}"), Style::default().fg(Color::Yellow)),
+                Span::styled(*action, Style::default().fg(Color::White)),
+            ]));
+        }
+    }
+
+    let visible = (area.height.saturating_sub(2) as usize).max(1);
+    let max_offset = lines.len().saturating_sub(visible);
+    let offset = app.nav.help_offset.min(max_offset);
+    app.nav.help_offset = offset;
+    let end = (offset + visible).min(lines.len());
+
+    let position = if max_offset == 0 {
+        String::new()
+    } else {
+        format!(" · {}%", offset * 100 / max_offset.max(1))
+    };
+    let block = Block::default()
+        .title(format!(
+            " ❓ Help — keys · ↑↓ / PgUp / PgDn scroll · Esc close{position} "
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme));
+    f.render_widget(
+        Paragraph::new(lines[offset..end].to_vec()).block(block),
+        area,
+    );
+}
+
 /// Modal confirmation for destructive actions and full refreshes.
 fn render_confirm(f: &mut Frame, app: &App, area: Rect) {
     let Some(confirm) = &app.confirm else {
@@ -1184,6 +1230,7 @@ fn render_main_menu(f: &mut Frame, app: &mut App, area: Rect, theme: Color) {
     if app.needs_source_update {
         status.push_str("\n   ⚠ sources changed — UPDATE to apply");
     }
+    status.push_str("\n   F1 / ? — key reference");
     f.render_widget(
         Paragraph::new(status)
             .alignment(Alignment::Center)
@@ -1200,6 +1247,7 @@ fn render_main_menu(f: &mut Frame, app: &mut App, area: Rect, theme: Color) {
         "  ⏹   STOP ALL",
         "  🔄  UPDATE",
         "  ⚙   SETTINGS",
+        "  ❓  HELP",
         "  🚪  EXIT",
     ];
     let list = List::new(items.map(|s| ListItem::new(s).style(Style::default().fg(theme))))

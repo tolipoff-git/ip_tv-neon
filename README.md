@@ -133,6 +133,7 @@ cache until restarted.
 4. When a source changed you are offered **“Download playlist + EPG now?”** — answer `Y`, or run
    **Main Menu → 🔄 Update** later.
 5. **IPTV → category → channel → Enter** to open the detail screen, then `Enter`/`l` to play.
+6. Press **`F1`** any time for the in-app key reference (also **Main Menu → ❓ Help**).
 
 The config file is created the first time a setting is saved. The cache is created by the first update.
 
@@ -228,6 +229,14 @@ Behavior worth knowing:
   playlist and EPG (`T` in edit mode tests just that value).
 - **Destructive rows ask first.** Clearing history/favorites opens a confirmation dialog.
 - **Test sources** reads only a 64 KiB prefix; it never downloads the whole EPG.
+
+### Help screen (key reference)
+
+Press **`F1`** (or **`?`**) on any screen, or pick **Main Menu → ❓ Help**. It lists every key grouped by screen —
+navigation, IPTV, detail/EPG, radio, playback, favourites/history, AI chat, settings (list + editor), confirmation
+dialogs — and scrolls with `↑↓` / `PgUp` / `PgDn` / `Home` / `End` (the title shows the scroll position).
+`Esc` / `Enter` / `F1` / `?` close it and return to where you were. `?` is ignored while the key would be typed as
+text (channel filter, settings editor, AI chat); `F1` always works. The table lives in `src/help.rs`.
 
 ### Stable favorite/history keys
 

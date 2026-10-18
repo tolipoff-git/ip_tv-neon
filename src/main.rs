@@ -18,6 +18,7 @@ mod ai;
 mod app;
 mod consts;
 mod epg;
+mod help;
 mod lock;
 mod models;
 mod mpv_ipc;
@@ -34,7 +35,7 @@ use settings::{SETTINGS, SettingId, SettingKind};
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const MENU_ITEMS: usize = 10;
+const MENU_ITEMS: usize = 11;
 /// Normal UI redraw rate (keyboard-driven)
 const TICK_RATE: Duration = Duration::from_millis(1000);
 /// Radio animation tick: 20 FPS — drives VU meters and marquee
@@ -585,6 +586,14 @@ async fn handle_key(
         return;
     }
 
+    // Help overlay: F1 from anywhere; `?` too, unless the key would be text
+    // input (channel filter / settings editor). Not while a video plays — the
+    // TUI is hidden behind the mpv window in that case.
+    if key.code == KeyCode::F(1) || (key.code == KeyCode::Char('?') && !in_text_entry) {
+        app.toggle_help();
+        return;
+    }
+
     let screen = app.screen;
     match screen {
         Screen::MainMenu => handle_main_menu_input(app, key.code).await,
@@ -600,6 +609,7 @@ async fn handle_key(
             handle_settings_edit_input(app, key, field, probe_task, http_client)
         }
         Screen::Detail => handle_detail_input(app, key.code),
+        Screen::Help => handle_help_input(app, key.code),
         Screen::AiChat | Screen::Confirm => {} // Handled in main loop / above
         Screen::LocalList => {
             if key.code == KeyCode::Esc {
@@ -651,7 +661,8 @@ async fn handle_main_menu_input(app: &mut App, code: KeyCode) {
                 app.status_msg = None;
                 app.screen = Screen::Settings;
             }
-            9 => {
+            9 => app.toggle_help(),
+            10 => {
                 app.stop_all();
                 app.quit = true;
             }
@@ -1059,6 +1070,24 @@ async fn handle_probe_task(
             app.status_msg = Some(text);
         }
         Err(e) => app.status_msg = Some(format!("Source test crashed: {e}")),
+    }
+    app.needs_redraw = true;
+}
+
+/// Scroll keys for the help overlay. The offset is clamped to the real maximum
+/// in `render_help`, which knows the wrapped line count; here we only bound the
+/// lower edge and let the renderer trim the top.
+fn handle_help_input(app: &mut App, code: KeyCode) {
+    const PAGE: usize = 12;
+    match code {
+        KeyCode::Up => app.nav.help_offset = app.nav.help_offset.saturating_sub(1),
+        KeyCode::Down => app.nav.help_offset = app.nav.help_offset.saturating_add(1),
+        KeyCode::PageUp => app.nav.help_offset = app.nav.help_offset.saturating_sub(PAGE),
+        KeyCode::PageDown => app.nav.help_offset = app.nav.help_offset.saturating_add(PAGE),
+        KeyCode::Home => app.nav.help_offset = 0,
+        KeyCode::End => app.nav.help_offset = usize::MAX,
+        KeyCode::Esc | KeyCode::Enter | KeyCode::F(1) | KeyCode::Char('?') => app.close_help(),
+        _ => {}
     }
     app.needs_redraw = true;
 }
