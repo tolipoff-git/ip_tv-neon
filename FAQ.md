@@ -24,6 +24,23 @@ rejected in the editor with the reason, so a typo can't silently break the next 
 
 ---
 
+### I installed a new build but the app looks unchanged (F1/Help missing, old menu)?
+
+You are almost certainly running a **stale copy** — usually an older binary earlier in `PATH`
+(`~/.local/bin/ip_tv-neon` before `~/.cargo/bin/ip_tv-neon`). Check which one actually runs:
+
+```bash
+ip_tv-neon --version      # prints e.g. "ip_tv-neon 0.11.1"
+ip_tv-neon diag           # prints "Binary: /path/to/the/executable" + "Version:"
+```
+
+If the version or path is not the build you just installed, either remove the old file or point it at the new build
+(e.g. `ln -sfn ~/.cargo/bin/ip_tv-neon ~/.local/bin/ip_tv-neon`). Also remember the **running** process keeps the
+old binary in memory: quit it (`q`) and relaunch before testing new features. Building from source with
+`cargo install --path .` refreshes `~/.cargo/bin/ip_tv-neon`; a symlink in `~/.local/bin` follows it automatically.
+
+---
+
 ### Where is the list of keyboard shortcuts?
 
 Press **`F1`** (or **`?`**) on any screen, or choose **Main Menu → ❓ Help**. The overlay groups the keys by screen and

@@ -79,6 +79,12 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         Some("diag") => return diag(),
+        // Cheap way to answer "am I running the build I just installed?" —
+        // a stale copy earlier in PATH caused exactly that confusion.
+        Some("--version" | "-V" | "version") => {
+            println!("ip_tv-neon {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
         _ => {}
     }
 
@@ -1114,6 +1120,13 @@ fn handle_detail_input(app: &mut App, code: KeyCode) {
 
 fn diag() -> Result<()> {
     println!("NEON IPTV Diagnostics");
+    println!("Version: {}", env!("CARGO_PKG_VERSION"));
+    println!(
+        "Binary:  {}",
+        std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "unknown".into())
+    );
     println!("Config: {}", consts::get_config_json_path().display());
     println!("Cache:  {}", consts::get_data_bin_path().display());
     println!("Config exists: {}", consts::get_config_json_path().exists());

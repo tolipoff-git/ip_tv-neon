@@ -113,6 +113,7 @@ cp target/release/ip_tv-neon ~/.local/bin/
 
 ```bash
 ip_tv-neon           # launch the TUI (single instance; refuses to start a second one)
+ip_tv-neon --version # print the build version — check you are not running a stale copy
 ip_tv-neon update    # refresh playlist + EPG + radio without opening the TUI
 ip_tv-neon diag      # print config/cache paths and URLs (tokens masked)
 ip_tv-neon --debug   # launch with extra mpv/app logging
