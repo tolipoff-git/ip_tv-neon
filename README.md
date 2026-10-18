@@ -112,18 +112,26 @@ cp target/release/ip_tv-neon ~/.local/bin/
 ### Commands
 
 ```bash
-ip_tv-neon           # launch the TUI
+ip_tv-neon           # launch the TUI (single instance; refuses to start a second one)
 ip_tv-neon update    # refresh playlist + EPG + radio without opening the TUI
-ip_tv-neon diag      # print config/cache paths, URLs and cache state
+ip_tv-neon diag      # print config/cache paths and URLs (tokens masked)
 ip_tv-neon --debug   # launch with extra mpv/app logging
 ```
+
+`update` reports each source separately and exits non-zero only when the playlist itself failed. An unreachable or
+404 EPG is a **warning** (`warning: EPG: HTTP 404 — guide unavailable`) and the playlist is still cached; an unset
+playlist URL is a hard error with instructions. If the TUI is running, `update` warns that the app keeps its old
+cache until restarted.
 
 ### First run
 
 1. Launch `ip_tv-neon`.
-2. **Settings → Playlist URL** → paste your M3U/M3U8 URL (or a local file path).
-3. **Settings → EPG URL** → paste your XMLTV source. A default is pre-filled: `https://epg.one/epg.xml.gz`.
-4. **Main Menu → 🔄 Update** → downloads playlist, EPG and radio stations into the cache.
+2. **Settings → Playlist URL / file** → hit `Enter`, paste your M3U/M3U8 URL (or a local file path) — a paste into a
+   freshly opened field **replaces** the old value. Press `Enter` to save. `Ctrl+T` tests the URL before saving.
+3. **Settings → EPG URL** → paste your XMLTV source (or press `R` to restore the default
+   `https://epg.one/epg.xml.gz`). `T` tests both configured sources and reports the HTTP status.
+4. When a source changed you are offered **“Download playlist + EPG now?”** — answer `Y`, or run
+   **Main Menu → 🔄 Update** later.
 5. **IPTV → category → channel → Enter** to open the detail screen, then `Enter`/`l` to play.
 
 The config file is created the first time a setting is saved. The cache is created by the first update.
@@ -139,7 +147,11 @@ The config file is created the first time a setting is saved. The cache is creat
 | `~/.config/neon-iptv/config.json` | Main config (URLs, theme, AI provider, favorites, history). Written `0600`, atomic replace. |
 | `~/.config/neon-iptv/ai_prompt.md` | Optional AI system-prompt override. **You create this** — it is never written by the app. |
 | `~/.cache/neon-iptv/data.bin` | Binary cache (channels, EPG, radio), prefixed with a schema version. |
+| `~/.cache/neon-iptv/cache-meta.json` | Which playlist/EPG URLs produced the cache, when, and any EPG warning. Drives the staleness hints. |
+| `~/.cache/neon-iptv/instance.lock` | `flock` guard: a second TUI refuses to start instead of racing on `config.json`. |
 | `~/.cache/neon-iptv/neon_iptv.log` | App log — error/security events (e.g. blocked URL scheme, cache invalidation, EPG cap hit). |
+| `~/.config/neon-iptv/config.json.pre-keys.*.bak` | One-time backup taken before favorites/history were migrated from URLs to stable keys. |
+| `~/.config/neon-iptv/config.json.conflict.*.bak` | Copy of a `config.json` that was edited by another process while the app was running. |
 | `$TMPDIR/neon_mpv.log` | mpv's own log — only when launched with `--debug`. |
 | `$TMPDIR/neon_mpv_stderr.log` | Radio mpv stderr (always captured for radio). |
 
@@ -152,9 +164,11 @@ Paths follow the [XDG Base Directory Specification](https://specifications.freed
   "playlist_url": "https://example.com/playlist.m3u",
   "epg_url": "https://epg.one/epg.xml.gz",
   "theme_color": [0, 255, 255],
-  "favorites": [],
-  "history": [],
-  "channel_names": {},
+  "favorites": ["id:204"],
+  "history": ["id:204", "radio:128"],
+  "channel_names": { "id:204": "Channel One" },
+  "entry_urls": { "id:204": "https://cdn/204/index.m3u8" },
+  "entry_schema": 2,
   "video_fullscreen": true,
   "video_geometry": "1280x720",
   "local_dir": "",
@@ -162,14 +176,19 @@ Paths follow the [XDG Base Directory Specification](https://specifications.freed
 }
 ```
 
+Every field has a default: a hand-edited config that omits a key still loads (missing keys fall back instead of
+turning the whole file into `config.json.bak`).
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `playlist_url` | string | M3U/M3U8 URL, or a local file path. |
 | `epg_url` | string | XMLTV EPG URL (supports `.xml.gz`). Default: `https://epg.one/epg.xml.gz`. |
 | `theme_color` | `[R,G,B]` | UI accent color (one of the theme presets below). |
-| `favorites` | string[] | Stream URLs marked favorite. |
-| `history` | string[] | Last 200 watched stream URLs (auto-managed). |
-| `channel_names` | object | URL → name cache so favorites/history render without a loaded playlist (auto-managed). |
+| `favorites` | string[] | **Stable entry keys** of favorite channels/stations (see [Stable keys](#stable-favoritehistory-keys)). |
+| `history` | string[] | Last 200 watched entries, as stable keys (auto-managed). |
+| `channel_names` | object | Entry key → display name cache, so favorites/history render without a loaded playlist (auto-managed). |
+| `entry_urls` | object | Entry key → last known stream URL, used when the entry is absent from the current playlist (auto-managed). |
+| `entry_schema` | int | `2` = stable keys. A `1`/absent value is migrated on first launch (with a `*.pre-keys.*.bak` backup). |
 | `video_fullscreen` | bool | Launch the mpv window fullscreen. |
 | `video_geometry` | string | mpv window size when fullscreen is off (e.g. `1920x1080`). |
 | `local_dir` | string | Directory to scan for local `.m3u`/`.m3u8`. Empty = scan `~/`, `~/Downloads/`, `~/Videos/`. |
@@ -177,19 +196,55 @@ Paths follow the [XDG Base Directory Specification](https://specifications.freed
 
 ### Settings screen
 
-Open with **Main Menu → ⚙ Settings**. `↑↓` move, `Enter` edits or toggles, `Esc` goes back.
+Open with **Main Menu → ⚙ Settings**. Rows are grouped by section and each row shows how it reacts:
+`✎` = editable text, `◀` = toggle/cycle, `!` = destructive action.
 
-| # | idx | Setting | Action |
-|---|-----|---------|--------|
-| 1 | 0 | Playlist URL | edit |
-| 2 | 1 | EPG URL | edit |
-| 3 | 2 | Fullscreen | toggle |
-| 4 | 3 | Window Geometry | edit |
-| 5 | 4 | Theme | toggle (cycles 7 presets) |
-| 6 | 5 | **AI Provider** | toggle (cycles the model catalog) |
-| 7 | 6 | Local Playlists Dir | edit |
-| 8 | 7 | Clear History | action |
-| 9 | 8 | Clear Favorites | action |
+| Section | Setting | Action |
+|---------|---------|--------|
+| SOURCES | Playlist URL / file | `Enter` edit |
+| SOURCES | EPG URL | `Enter` edit |
+| SOURCES | Local playlists dir | `Enter` edit |
+| PLAYER | Fullscreen | `Enter` / `←→` toggle |
+| PLAYER | Window geometry | `Enter` edit (`WIDTHxHEIGHT`) |
+| APPEARANCE | Theme | `Enter` / `←→` cycle 7 presets (both directions) |
+| AI | AI provider | `Enter` / `←→` cycle the model catalog |
+| DATA | Clear history | `Enter` → confirmation |
+| DATA | Clear favorites | `Enter` → confirmation |
+
+List keys: `↑↓` move · `←→` adjust toggles/cycles · `Enter` edit/toggle/act · `T` test the configured sources ·
+`R` reset the selected text row to its default · `Esc` back.
+
+Editor keys: `←→ Home End Delete Backspace` · `Ctrl+U` clear the line · `Ctrl+W` delete a word · `Ctrl+T` test the
+value being edited · `Enter` save (invalid input is rejected in place, with the reason) · `Esc` cancel.
+
+Behavior worth knowing:
+
+- **Pasting replaces.** A paste into a freshly opened field swaps the whole value; after you start typing, pastes
+  insert at the cursor.
+- **Validation before saving.** The playlist must be an `http(s)` URL or an existing `.m3u` file, the EPG must be an
+  `http(s)` URL, and the geometry must be `WIDTHxHEIGHT`. Whitespace is trimmed. A bad value is never written.
+- **Source freshness.** After a source URL changes the app asks whether to download now; until then the Settings
+  footer and Main Menu show `⚠ sources changed — UPDATE to apply`. `T` reports the HTTP status of the configured
+  playlist and EPG (`T` in edit mode tests just that value).
+- **Destructive rows ask first.** Clearing history/favorites opens a confirmation dialog.
+- **Test sources** reads only a 64 KiB prefix; it never downloads the whole EPG.
+
+### Stable favorite/history keys
+
+Favorites and history are stored under an identity key, not the stream URL:
+
+| Key | Means |
+|-----|-------|
+| `id:<tvg-id>` | the channel's XMLTV id — preferred |
+| `name:<normalized name>` | fallback when the playlist has no `tvg-id` |
+| `radio:<station id>` | a radio station |
+| `url:<stream url>` | last resort, for entries with no identity anywhere |
+
+On update, an entry is resolved against the current playlist first, so **rotating the provider link or reissuing
+tokens does not lose your favorites/history**. Entries that vanish from the playlist keep playing from their
+remembered URL. The very first launch after upgrading migrates old URL-keyed lists: the app backs up the config to
+`config.json.pre-keys.<unix>.bak`, maps each old URL to a key (by URL, then — only when unambiguous — by channel
+name), and collapses duplicates. This is one-time and idempotent.
 
 ### Theme presets
 

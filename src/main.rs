@@ -18,15 +18,19 @@ mod ai;
 mod app;
 mod consts;
 mod epg;
+mod lock;
 mod models;
 mod mpv_ipc;
 mod player;
+mod settings;
+mod text_input;
 mod ui;
 mod utils;
 
-use app::App;
-use epg::{fetch_radio_now, scan_local_playlists, update_data};
-use models::{Config, SETTINGS_COUNT, Screen};
+use app::{App, Confirm, ConfirmAction};
+use epg::{SourceKind, fetch_radio_now, probe_source, scan_local_playlists, update_data};
+use models::{Config, Screen};
+use settings::{SETTINGS, SettingId, SettingKind};
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -56,12 +60,29 @@ async fn main() -> Result<()> {
 
     match args.get(1).map(|s| s.as_str()) {
         Some("update") => {
-            update_data(&config, &http_client).await?;
+            // The TUI keeps config+data in memory; it never sees this update
+            // until restarted, so warn instead of pretending everything is live.
+            if lock::other_instance_running() {
+                eprintln!(
+                    "warning: the TUI is running — it will keep its old cache until restarted"
+                );
+            }
+            let report = update_data(&config, &http_client).await?;
+            println!(
+                "Updated: {} channels, {} radio, {} EPG channels",
+                report.channels, report.radio, report.epg_channels
+            );
+            if let Some(w) = report.warning {
+                eprintln!("warning: {w}");
+            }
             return Ok(());
         }
         Some("diag") => return diag(),
         _ => {}
     }
+
+    // Single instance: two TUIs would clobber config.json (last writer wins).
+    let _instance_lock = lock::InstanceLock::acquire()?;
 
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -90,7 +111,8 @@ async fn main() -> Result<()> {
     let mut radio_tracks_dirty = true;
     let mut radio_task: Option<tokio::task::JoinHandle<HashMap<String, String>>> = None;
     let mut ai_task: Option<tokio::task::JoinHandle<ai::AiChatResponse>> = None;
-    let mut update_task: Option<tokio::task::JoinHandle<Result<()>>> = None;
+    let mut update_task: Option<tokio::task::JoinHandle<Result<epg::UpdateReport>>> = None;
+    let mut probe_task: Option<tokio::task::JoinHandle<ProbeResults>> = None;
 
     // 50ms interval for radio animation — only polled when radio IPC is active
     let mut radio_interval = interval(RADIO_TICK);
@@ -127,6 +149,7 @@ async fn main() -> Result<()> {
         .await;
         handle_ai_task(&mut app, &mut ai_task).await;
         handle_update_task(&mut app, &http_client, &mut update_task).await;
+        handle_probe_task(&mut app, &mut probe_task).await;
 
         // ── Draw ──────────────────────────────────────────────────────────────
         if app.needs_redraw || last_tick.elapsed() >= TICK_RATE {
@@ -143,7 +166,14 @@ async fn main() -> Result<()> {
         };
 
         if event::poll(poll_timeout)? {
-            handle_input_event(&mut app, event::read()?, &mut ai_task, &http_client).await;
+            handle_input_event(
+                &mut app,
+                event::read()?,
+                &mut ai_task,
+                &mut probe_task,
+                &http_client,
+            )
+            .await;
         }
         if app.quit {
             break;
@@ -259,7 +289,7 @@ async fn handle_ai_task(
 async fn handle_update_task(
     app: &mut App,
     http_client: &reqwest::Client,
-    update_task: &mut Option<tokio::task::JoinHandle<Result<()>>>,
+    update_task: &mut Option<tokio::task::JoinHandle<Result<epg::UpdateReport>>>,
 ) {
     if matches!(app.screen, Screen::Updating) && update_task.is_none() {
         let config = app.config.clone();
@@ -272,12 +302,19 @@ async fn handle_update_task(
         && let Some(task) = update_task.take()
     {
         match task.await {
-            Ok(Ok(())) => {
+            Ok(Ok(report)) => {
                 app.reload_data();
-                let ch = app.data.channels.len();
-                let rd = app.data.radio.len();
-                let epg = app.data.epg.len();
-                app.status_msg = Some(format!("Updated: {} ch, {} radio, {} EPG", ch, rd, epg));
+                app.needs_source_update = false;
+                app.status_msg = Some(match report.warning {
+                    Some(w) => format!(
+                        "Updated: {} ch, {} radio — warning: {}",
+                        report.channels, report.radio, w
+                    ),
+                    None => format!(
+                        "Updated: {} ch, {} radio, {} EPG",
+                        report.channels, report.radio, report.epg_channels
+                    ),
+                });
             }
             Ok(Err(e)) => {
                 app.status_msg = Some(format!("Update failed: {}", e));
@@ -292,10 +329,13 @@ async fn handle_update_task(
 }
 
 /// Processes input events (keyboard, mouse, paste) and routes them to active screen.
+type ProbeResults = Vec<(String, Result<String, String>)>;
+
 async fn handle_input_event(
     app: &mut App,
     event: Event,
     ai_task: &mut Option<tokio::task::JoinHandle<ai::AiChatResponse>>,
+    probe_task: &mut Option<tokio::task::JoinHandle<ProbeResults>>,
     http_client: &reqwest::Client,
 ) {
     match event {
@@ -383,7 +423,7 @@ async fn handle_input_event(
                 _ => false,
             };
             if !handled {
-                handle_key(app, key).await;
+                handle_key(app, key, probe_task, http_client).await;
             }
         }
         Event::Paste(data) => handle_paste(app, &data),
@@ -449,17 +489,30 @@ fn handle_paste(app: &mut App, data: &str) {
             app.nav.search.push_str(&clean);
             app.update_filter();
         }
-        Screen::SettingsEdit(_) => app.nav.edit_buf.push_str(&clean),
+        // A fresh settings field is replaced wholesale: "swap this link" is the
+        // common gesture, and appending to the old URL is never what was meant.
+        Screen::SettingsEdit(_) => app.input.insert_str(&clean),
         _ => {}
     }
 }
 
 // ─── Key Handlers ────────────────────────────────────────────────────────────
 
-async fn handle_key(app: &mut App, key: event::KeyEvent) {
+async fn handle_key(
+    app: &mut App,
+    key: event::KeyEvent,
+    probe_task: &mut Option<tokio::task::JoinHandle<ProbeResults>>,
+    http_client: &reqwest::Client,
+) {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         app.stop_all();
         app.quit = true;
+        return;
+    }
+
+    // A confirmation dialog owns every key until it closes.
+    if app.screen == Screen::Confirm {
+        handle_confirm_input(app, key.code);
         return;
     }
 
@@ -542,11 +595,13 @@ async fn handle_key(app: &mut App, key: event::KeyEvent) {
         Screen::RadioList => handle_radio_list_input(app, key.code),
         Screen::Favorites => handle_favorites_input(app, key.code),
         Screen::History => handle_history_input(app, key.code),
-        Screen::Settings => handle_settings_input(app, key.code),
-        Screen::SettingsEdit(field) => handle_settings_edit_input(app, key.code, field),
+        Screen::Settings => handle_settings_input(app, key, probe_task, http_client),
+        Screen::SettingsEdit(field) => {
+            handle_settings_edit_input(app, key, field, probe_task, http_client)
+        }
         Screen::Detail => handle_detail_input(app, key.code),
-        Screen::AiChat => {} // Handled in main loop
-        Screen::LocalList | Screen::LinkInput => {
+        Screen::AiChat | Screen::Confirm => {} // Handled in main loop / above
+        Screen::LocalList => {
             if key.code == KeyCode::Esc {
                 app.screen = Screen::MainMenu;
             }
@@ -646,14 +701,7 @@ fn handle_chan_list_input(app: &mut App, code: KeyCode) {
             if let Some(idx) = app.nav.ch_state.selected()
                 && idx < app.nav.filtered.len()
             {
-                let ch = &app.data.channels[app.nav.filtered[idx]];
-                let url = ch.url.clone();
-                let name = ch.name.clone();
-                if app.config.favorites.contains(&url) {
-                    app.config.favorite_remove(&url);
-                } else {
-                    app.config.favorite_add(&url, &name);
-                }
+                app.toggle_favorite_channel(app.nav.filtered[idx]);
             }
         }
         KeyCode::Char(c) => {
@@ -713,14 +761,7 @@ fn handle_radio_list_input(app: &mut App, code: KeyCode) {
             if let Some(idx) = app.nav.r_state.selected()
                 && idx < app.nav.filtered_radio.len()
             {
-                let st = &app.data.radio[app.nav.filtered_radio[idx]];
-                let url = st.stream.clone();
-                let name = st.title.clone();
-                if app.config.favorites.contains(&url) {
-                    app.config.favorite_remove(&url);
-                } else {
-                    app.config.favorite_add(&url, &name);
-                }
+                app.toggle_favorite_radio(app.nav.filtered_radio[idx]);
             }
         }
         KeyCode::Esc => app.screen = Screen::RadioCatList,
@@ -735,14 +776,8 @@ fn handle_favorites_input(app: &mut App, code: KeyCode) {
         KeyCode::Enter => {
             if let Some(idx) = app.nav.fav_state.selected() {
                 let favs = app.sorted_favorites();
-                if idx < favs.len() {
-                    let url = favs[idx].clone();
-                    let name = ui::get_name_by_url(&url, &app.data, &app.config).to_string();
-                    if is_radio_url(&url, &app.data) {
-                        app.run_radio(&url, &name, "");
-                    } else {
-                        app.run_video(&url, &name, "");
-                    }
+                if let Some(key) = favs.get(idx) {
+                    app.play_entry(&key.clone());
                 }
             }
         }
@@ -756,16 +791,66 @@ fn handle_history_input(app: &mut App, code: KeyCode) {
         KeyCode::Up => nav_up(&mut app.nav.hist_state, app.config.history.len()),
         KeyCode::Down => nav_down(&mut app.nav.hist_state, app.config.history.len()),
         KeyCode::Enter => {
-            if let Some(idx) = app.nav.hist_state.selected() {
-                let history: Vec<_> = app.config.history.iter().rev().collect();
-                if idx < history.len() {
-                    let url = history[idx].clone();
-                    let name = ui::get_name_by_url(&url, &app.data, &app.config).to_string();
-                    if is_radio_url(&url, &app.data) {
-                        app.run_radio(&url, &name, "");
-                    } else {
-                        app.run_video(&url, &name, "");
+            if let Some(idx) = app.nav.hist_state.selected()
+                && idx < app.config.history.len()
+            {
+                let key = app.config.history.iter().rev().nth(idx).cloned();
+                if let Some(key) = key {
+                    app.play_entry(&key);
+                }
+            }
+        }
+        KeyCode::Esc => app.screen = Screen::MainMenu,
+        _ => {}
+    }
+}
+
+fn handle_settings_input(
+    app: &mut App,
+    key: event::KeyEvent,
+    probe_task: &mut Option<tokio::task::JoinHandle<ProbeResults>>,
+    http_client: &reqwest::Client,
+) {
+    let selected = app.nav.set_state.selected().unwrap_or(0);
+    match key.code {
+        KeyCode::Up => nav_up(&mut app.nav.set_state, SETTINGS.len()),
+        KeyCode::Down => nav_down(&mut app.nav.set_state, SETTINGS.len()),
+        KeyCode::Left | KeyCode::Right => {
+            if let Some(setting) = settings::setting_at(selected)
+                && matches!(setting.kind, SettingKind::Toggle | SettingKind::Cycle)
+            {
+                let delta = if key.code == KeyCode::Left { -1 } else { 1 };
+                app.settings_adjust(setting.id, delta);
+            }
+        }
+        KeyCode::Enter => {
+            let Some(setting) = settings::setting_at(selected) else {
+                return;
+            };
+            match setting.kind {
+                SettingKind::Text => {
+                    app.settings_begin_edit(setting.id, setting.kind);
+                    app.screen = Screen::SettingsEdit(selected);
+                }
+                SettingKind::Toggle | SettingKind::Cycle => app.settings_adjust(setting.id, 0),
+                SettingKind::Action => open_clear_confirm(app, setting.id),
+            }
+        }
+        // Test the configured sources without leaving the screen.
+        KeyCode::Char('t' | 'T') => start_source_probe(app, probe_task, http_client, None),
+        // Reset a text row to its default.
+        KeyCode::Char('r' | 'R') => {
+            if let Some(setting) = settings::setting_at(selected)
+                && setting.kind == SettingKind::Text
+            {
+                match app.settings_reset(setting.id) {
+                    Ok(source_changed) => {
+                        app.status_msg = Some("Default restored".into());
+                        if source_changed {
+                            prompt_update(app, setting.id);
+                        }
                     }
+                    Err(e) => app.setting_error = Some(e),
                 }
             }
         }
@@ -774,46 +859,208 @@ fn handle_history_input(app: &mut App, code: KeyCode) {
     }
 }
 
-fn handle_settings_input(app: &mut App, code: KeyCode) {
-    match code {
-        KeyCode::Up => nav_up(&mut app.nav.set_state, SETTINGS_COUNT),
-        KeyCode::Down => nav_down(&mut app.nav.set_state, SETTINGS_COUNT),
-        KeyCode::Enter => {
-            let idx = app.nav.set_state.selected().unwrap_or(0);
-            match idx {
-                0 | 1 | 3 | 6 => {
-                    app.nav.edit_buf = app.settings_value(idx);
-                    app.screen = Screen::SettingsEdit(idx);
-                }
-                2 | 4 | 5 | 7 | 8 => {
-                    app.settings_toggle(idx);
-                }
-                _ => {}
+fn handle_settings_edit_input(
+    app: &mut App,
+    key: event::KeyEvent,
+    field: usize,
+    probe_task: &mut Option<tokio::task::JoinHandle<ProbeResults>>,
+    http_client: &reqwest::Client,
+) {
+    let Some(setting) = settings::setting_at(field) else {
+        app.screen = Screen::Settings;
+        return;
+    };
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+    match key.code {
+        KeyCode::Char('t' | 'T') if ctrl => {
+            if let Some(kind) = source_kind_for(setting.id) {
+                let target = (setting.label.to_string(), app.input.value(), kind);
+                start_source_probe(app, probe_task, http_client, Some(target));
             }
         }
-        KeyCode::Esc => app.screen = Screen::MainMenu,
-        _ => {}
-    }
-}
-
-fn handle_settings_edit_input(app: &mut App, code: KeyCode, field: usize) {
-    match code {
-        KeyCode::Char(c) => app.nav.edit_buf.push(c),
-        KeyCode::Backspace => {
-            app.nav.edit_buf.pop();
-        }
-        KeyCode::Enter => {
-            let val = app.nav.edit_buf.clone();
-            app.settings_apply(field, &val);
-            app.status_msg = Some("Saved".into());
-            app.screen = Screen::Settings;
-        }
+        KeyCode::Char('u' | 'U') if ctrl => app.input.kill_to_start(),
+        KeyCode::Char('w' | 'W') if ctrl => app.input.kill_word(),
+        KeyCode::Char(c) if !ctrl => app.input.insert_char(c),
+        KeyCode::Backspace => app.input.backspace(),
+        KeyCode::Delete => app.input.delete(),
+        KeyCode::Left => app.input.move_left(),
+        KeyCode::Right => app.input.move_right(),
+        KeyCode::Home => app.input.home(),
+        KeyCode::End => app.input.end(),
+        KeyCode::Enter => match app.settings_commit(setting.id) {
+            Ok(source_changed) => {
+                app.setting_error = None;
+                app.screen = Screen::Settings;
+                app.status_msg = Some("Saved".into());
+                if source_changed {
+                    prompt_update(app, setting.id);
+                }
+            }
+            Err(e) => {
+                // Stay in the editor so the value can be fixed, not saved broken.
+                app.setting_error = Some(e);
+            }
+        },
         KeyCode::Esc => {
-            app.nav.edit_buf.clear();
+            app.setting_error = None;
             app.screen = Screen::Settings;
         }
         _ => {}
     }
+}
+
+fn source_kind_for(id: SettingId) -> Option<SourceKind> {
+    match id {
+        SettingId::PlaylistUrl => Some(SourceKind::Playlist),
+        SettingId::EpgUrl => Some(SourceKind::Epg),
+        _ => None,
+    }
+}
+
+/// Ask for confirmation before a destructive action or a full data refresh.
+fn prompt_update(app: &mut App, id: SettingId) {
+    if !settings::invalidates_sources(id) {
+        return;
+    }
+    app.confirm = Some(Confirm {
+        prompt: "Sources changed. Download playlist + EPG now?".into(),
+        action: ConfirmAction::UpdateData,
+        return_to: Screen::Settings,
+    });
+    app.screen = Screen::Confirm;
+}
+
+fn open_clear_confirm(app: &mut App, id: SettingId) {
+    let (prompt, action) = match id {
+        SettingId::ClearHistory => (
+            format!(
+                "Clear all {} history entries? This cannot be undone.",
+                app.config.history.len()
+            ),
+            ConfirmAction::ClearHistory,
+        ),
+        SettingId::ClearFavorites => (
+            format!(
+                "Clear all {} favorites? This cannot be undone.",
+                app.config.favorites.len()
+            ),
+            ConfirmAction::ClearFavorites,
+        ),
+        _ => return,
+    };
+    app.confirm = Some(Confirm {
+        prompt,
+        action,
+        return_to: Screen::Settings,
+    });
+    app.screen = Screen::Confirm;
+}
+
+fn handle_confirm_input(app: &mut App, code: KeyCode) {
+    let Some(confirm) = app.confirm.take() else {
+        app.screen = Screen::MainMenu;
+        return;
+    };
+    let confirmed = matches!(code, KeyCode::Char('y' | 'Y') | KeyCode::Enter);
+    if !confirmed {
+        app.screen = confirm.return_to;
+        app.status_msg = Some("Cancelled".into());
+        return;
+    }
+    match confirm.action {
+        ConfirmAction::UpdateData => {
+            app.status_msg = None;
+            app.screen = Screen::Updating;
+        }
+        ConfirmAction::ClearHistory => {
+            app.config.history.clear();
+            match app.config.save() {
+                Ok(()) => app.status_msg = Some("History cleared".into()),
+                Err(e) => app.status_msg = Some(format!("Save failed: {e}")),
+            }
+            app.screen = confirm.return_to;
+        }
+        ConfirmAction::ClearFavorites => {
+            app.config.favorites.clear();
+            match app.config.save() {
+                Ok(()) => app.status_msg = Some("Favorites cleared".into()),
+                Err(e) => app.status_msg = Some(format!("Save failed: {e}")),
+            }
+            app.screen = confirm.return_to;
+        }
+    }
+}
+
+/// Start a background probe of one source (edit mode) or both configured
+/// sources (list mode). Results land in `status_msg` via `handle_probe_task`.
+fn start_source_probe(
+    app: &mut App,
+    task: &mut Option<tokio::task::JoinHandle<ProbeResults>>,
+    http_client: &reqwest::Client,
+    single: Option<(String, String, SourceKind)>,
+) {
+    if task.is_some() {
+        app.status_msg = Some("Source test already running…".into());
+        return;
+    }
+    let targets = match single {
+        Some(target) => vec![target],
+        None => vec![
+            (
+                "Playlist".to_string(),
+                app.config.playlist_url.clone(),
+                SourceKind::Playlist,
+            ),
+            (
+                "EPG".to_string(),
+                app.config.epg_url.clone(),
+                SourceKind::Epg,
+            ),
+        ],
+    };
+    app.status_msg = Some("Testing sources…".into());
+    app.needs_redraw = true;
+    let client = http_client.clone();
+    *task = Some(tokio::spawn(async move {
+        let mut out = Vec::new();
+        for (label, url, kind) in targets {
+            let result = if url.trim().is_empty() {
+                Err("not set".to_string())
+            } else {
+                probe_source(&client, &url, kind).await
+            };
+            out.push((label, result));
+        }
+        out
+    }));
+}
+
+async fn handle_probe_task(
+    app: &mut App,
+    task: &mut Option<tokio::task::JoinHandle<ProbeResults>>,
+) {
+    if !task.as_ref().is_some_and(|t| t.is_finished()) {
+        return;
+    }
+    let Some(finished) = task.take() else {
+        return;
+    };
+    match finished.await {
+        Ok(results) => {
+            let text = results
+                .into_iter()
+                .map(|(label, result)| match result {
+                    Ok(msg) => format!("{label}: {msg}"),
+                    Err(e) => format!("{label}: FAIL — {e}"),
+                })
+                .collect::<Vec<_>>()
+                .join("   ·   ");
+            app.status_msg = Some(text);
+        }
+        Err(e) => app.status_msg = Some(format!("Source test crashed: {e}")),
+    }
+    app.needs_redraw = true;
 }
 
 fn handle_detail_input(app: &mut App, code: KeyCode) {
@@ -824,14 +1071,7 @@ fn handle_detail_input(app: &mut App, code: KeyCode) {
         KeyCode::Char('l') => app.detail_play_live(),
         KeyCode::Char('f') => {
             if let Some(ch_idx) = app.detail.channel.filter(|&i| i < app.data.channels.len()) {
-                let ch = &app.data.channels[ch_idx];
-                let url = ch.url.clone();
-                let name = ch.name.clone();
-                if app.config.favorites.contains(&url) {
-                    app.config.favorite_remove(&url);
-                } else {
-                    app.config.favorite_add(&url, &name);
-                }
+                app.toggle_favorite_channel(ch_idx);
             }
         }
         KeyCode::Esc => {
@@ -852,8 +1092,14 @@ fn diag() -> Result<()> {
     if let Ok(raw) = std::fs::read_to_string(consts::get_config_json_path())
         && let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw)
     {
-        println!("Playlist: {}", v["playlist_url"].as_str().unwrap_or("N/A"));
-        println!("EPG URL:  {}", v["epg_url"].as_str().unwrap_or("N/A"));
+        println!(
+            "Playlist: {}",
+            utils::mask_url(v["playlist_url"].as_str().unwrap_or("N/A"))
+        );
+        println!(
+            "EPG URL:  {}",
+            utils::mask_url(v["epg_url"].as_str().unwrap_or("N/A"))
+        );
     }
     Ok(())
 }
@@ -899,10 +1145,8 @@ fn switch_playing_channel(app: &mut App, up: bool) {
             }
             if let Some(idx) = app.nav.fav_state.selected() {
                 let favs = app.sorted_favorites();
-                if idx < favs.len() {
-                    let url = favs[idx].clone();
-                    let name = crate::ui::get_name_by_url(&url, &app.data, &app.config).to_string();
-                    app.run_video(&url, &name, "");
+                if let Some(key) = favs.get(idx).cloned() {
+                    app.play_entry(&key);
                 }
             }
         }
@@ -914,18 +1158,11 @@ fn switch_playing_channel(app: &mut App, up: bool) {
             }
             if let Some(idx) = app.nav.hist_state.selected()
                 && idx < app.config.history.len()
+                && let Some(key) = app.config.history.iter().rev().nth(idx).cloned()
             {
-                let url = app.config.history[idx].clone();
-                let name = crate::ui::get_name_by_url(&url, &app.data, &app.config).to_string();
-                app.run_video(&url, &name, "");
+                app.play_entry(&key);
             }
         }
         _ => {}
     }
-}
-
-fn is_radio_url(url: &str, data: &crate::models::AppData) -> bool {
-    data.radio
-        .iter()
-        .any(|r| r.stream == url || r.quality_urls.values().any(|u| u == url))
 }

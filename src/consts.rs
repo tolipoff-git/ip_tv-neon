@@ -73,3 +73,9 @@ pub fn get_data_bin_path() -> PathBuf {
 pub fn get_config_json_path() -> PathBuf {
     get_config_dir().join("config.json")
 }
+
+/// Sidecar describing which sources produced `data.bin` and when.
+/// Separate from the bincode cache so adding metadata never invalidates it.
+pub fn get_cache_meta_path() -> PathBuf {
+    get_cache_dir().join("cache-meta.json")
+}

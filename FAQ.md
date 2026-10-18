@@ -8,14 +8,19 @@ Practical answers, grounded in how the code actually behaves. For the full refer
 
 Two ways:
 
-1. **In-app:** Settings → *Playlist URL* / *EPG URL* → `Enter` to edit → type/paste → `Enter` to save. Then
-   Main Menu → 🔄 **Update**.
-2. **By file:** edit `~/.config/neon-iptv/config.json` (`playlist_url`, `epg_url`) while the app is closed, then run
-   `ip_tv-neon update`.
+1. **In-app:** Settings → *Playlist URL / file* / *EPG URL* → `Enter` to edit → **paste** (a paste into a freshly
+   opened field replaces the whole value) or type → `Enter` to save. `Ctrl+T` tests the value first; `T` on the list
+   tests both configured sources. When a source changed the app asks *“Download playlist + EPG now?”* — answer `Y`,
+   otherwise run Main Menu → 🔄 **Update** later.
+2. **By file:** edit `~/.config/neon-iptv/config.json` (`playlist_url`, `epg_url`) while the app is **closed**, then
+   run `ip_tv-neon update`. Editing the file while the TUI runs means the running app keeps its own copy and will
+   overwrite yours on its next save (a copy of your file is kept as `config.json.conflict.*.bak`).
 
 `playlist_url` accepts an HTTP/HTTPS URL **or** a local file path. `epg_url` accepts XMLTV, plain or `.xml.gz`
 (gzip is detected from the `.gz` extension or the gzip magic bytes). The EPG default is
-`https://epg.one/epg.xml.gz`. Nothing appears until you run **Update** — that's what downloads and caches everything.
+`https://epg.one/epg.xml.gz` — press `R` on that row to restore it. Nothing appears until you run **Update** — that's
+what downloads and caches everything. Saving is validated: a bad URL (wrong scheme, missing file, stray spaces) is
+rejected in the editor with the reason, so a typo can't silently break the next update.
 
 ---
 
@@ -23,14 +28,47 @@ Two ways:
 
 The TUI reads from the cache (`data.bin`); the cache is only filled by **Update**. Run Main Menu → 🔄 Update (or
 `ip_tv-neon update`), watch the status line for `Updated: N ch, M radio, K EPG`, then browse. Run `ip_tv-neon diag`
-to confirm the paths and that the playlist/EPG URLs are what you expect.
+to confirm the paths and that the playlist/EPG URLs are what you expect (access tokens are masked in its output).
+
+If the playlist loaded but the guide is empty, `update`/the status line says why — e.g.
+`warning: EPG: HTTP 404 — guide unavailable` or `EPG: source contained no programmes`. The Settings footer and Main
+Menu show the cache age (`Cache: N ch, M EPG · updated 3h ago`), and a `⚠ sources changed — UPDATE to apply` hint
+appears whenever the configured URL differs from the one the cache was built from (`cache-meta.json`).
+
+---
+
+### I changed the playlist provider / the link rotated. Are my favorites and history lost?
+
+No. Favorites and history are stored under **stable keys**, not stream URLs:
+
+| Key | Means |
+|-----|-------|
+| `id:<tvg-id>` | the channel's XMLTV id (preferred) |
+| `name:<normalized name>` | fallback when the playlist carries no `tvg-id` |
+| `radio:<station id>` | a radio station |
+| `url:<url>` | last resort for entries with no identity |
+
+When you play an entry the app resolves it against the current playlist first, so after a link rotation the same
+channel is found by its id/name and plays from the new URL. Entries that disappeared from the playlist still play
+from the URL remembered in `entry_urls`. Upgrading from an older version migrates the old URL-keyed lists once,
+after backing up `config.json` to `config.json.pre-keys.<unix>.bak`; the migration also matches old entries to
+channels **by name when that match is unambiguous**.
+
+---
+
+### Can I run two instances, or edit the config while the app runs?
+
+No. The TUI takes an exclusive `flock` on `~/.cache/neon-iptv/instance.lock`; a second launch exits with
+`another instance is already running`. `ip_tv-neon update` is allowed while the TUI runs but warns that the running
+app keeps its old cache until restarted; if it writes the config while you had edited the file by hand, your version
+is preserved as `config.json.conflict.<unix>.bak`.
 
 ---
 
 ### How do I pick an AI model?
 
-Settings → **AI Provider** (the 6th row, settings index 5) → press `Enter` to cycle the catalog. The choice is
-saved as a short id token in `config.json` → `llm_provider`. The catalog:
+Settings → section **AI** → *AI provider* → press `Enter` (forward) or `←`/`→` to cycle the catalog in either
+direction. The choice is saved as a short id token in `config.json` → `llm_provider`. The catalog:
 
 | Pick | Needs |
 |------|-------|
@@ -193,7 +231,10 @@ affected by a cache bump.
 `config.json` failed to parse (hand-edited or truncated). Rather than silently discard it and overwrite your
 favorites/history on the next save, the app renames the bad file to `config.json.bak` and starts from defaults. Fix
 the JSON in the `.bak`, copy it back to `config.json`, and restart. The failure is also recorded in the log
-(`neon_iptv.log` in the cache dir).
+(`neon_iptv.log` in the cache dir). A merely **incomplete** config (a key missing) is no longer treated as corrupt:
+every field has a default now, so the rest of your settings load normally. Other backups you may see:
+`config.json.pre-keys.*.bak` (before the one-time stable-key migration) and `config.json.conflict.*.bak` (a
+hand-edit kept before the running app overwrote it).
 
 ---
 

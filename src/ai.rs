@@ -112,12 +112,18 @@ pub fn resolve_choice(id: &str) -> &'static ModelChoice {
 
 /// Next id in cycle order, wrapping past the end back to the first row.
 pub fn next_choice_id(id: &str) -> &'static str {
+    step_choice_id(id, 1)
+}
+
+/// Move `delta` rows through the catalog in cycle order (negative = backward).
+pub fn step_choice_id(id: &str, delta: i32) -> &'static str {
     let cur = resolve_choice(id);
     let pos = MODEL_CATALOG
         .iter()
         .position(|c| c.id == cur.id)
-        .unwrap_or(0);
-    MODEL_CATALOG[(pos + 1) % MODEL_CATALOG.len()].id
+        .unwrap_or(0) as i32;
+    let len = MODEL_CATALOG.len() as i32;
+    MODEL_CATALOG[(pos + delta).rem_euclid(len) as usize].id
 }
 
 /// Human-readable label for a persisted id token.

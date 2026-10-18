@@ -2,9 +2,10 @@
 
 use crate::app::App;
 use crate::epg::get_current_epg;
-use crate::models::{SETTINGS_COUNT, SETTINGS_LABELS, Screen};
+use crate::models::Screen;
 use crate::player::VU_BARS;
-use crate::utils::sanitize_terminal as sanitize;
+use crate::settings::{SETTINGS, SettingKind};
+use crate::utils::{human_age, sanitize_terminal as sanitize};
 use chrono::Utc;
 use ratatui::{prelude::*, widgets::*};
 
@@ -23,17 +24,6 @@ const NEON_DIM: Color = Color::Rgb(10, 10, 15);
 const RADIO_PANEL_H: u16 = 13;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-pub fn get_name_by_url<'a>(
-    url: &'a str,
-    data: &'a crate::models::AppData,
-    config: &'a crate::models::Config,
-) -> &'a str {
-    if let Some(ch) = data.url_index.get(url).and_then(|&i| data.channels.get(i)) {
-        return ch.name.as_str();
-    }
-    config.channel_name(url)
-}
 
 /// Return a `width`-char window of `text` starting at `offset`, with looping via
 /// a 2-space separator. Safe for any terminal width.
@@ -231,12 +221,17 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         Screen::LocalList => render_local_list(f, app, content_area, theme),
         Screen::Detail => render_detail(f, app, content_area),
         Screen::AiChat => render_ai_chat(f, app, content_area, theme),
-        Screen::LinkInput => {
-            f.render_widget(
-                Paragraph::new("\n\n  Not yet implemented.\n  Press ESC to return.")
-                    .alignment(Alignment::Center),
-                content_area,
-            );
+        Screen::Confirm => {
+            let back = app
+                .confirm
+                .as_ref()
+                .map(|c| c.return_to)
+                .unwrap_or(Screen::MainMenu);
+            match back {
+                Screen::Settings => render_settings(f, app, content_area, None),
+                _ => render_main_menu(f, app, content_area, theme),
+            }
+            render_confirm(f, app, full_area);
         }
     }
     // ── Compact neon radio panel (bottom) ─────────────────────────────────
@@ -587,7 +582,7 @@ fn render_detail(f: &mut Frame, app: &mut App, area: Rect) {
     let now = Utc::now().timestamp();
     let (r, g, b) = app.config.theme_color;
     let theme = Color::Rgb(r, g, b);
-    let is_fav = app.config.favorites.contains(&ch.url);
+    let is_fav = app.is_channel_favorite(ch_idx);
 
     let chunks = Layout::default()
         .constraints([
@@ -746,62 +741,215 @@ fn format_time(ts: i64) -> String {
 
 // ─── Settings Screen ─────────────────────────────────────────────────────────
 
+/// One settings row, including the editing cursor when this row is open.
+fn setting_line(
+    app: &App,
+    setting: &crate::settings::Setting,
+    editing: bool,
+    selected: bool,
+    inner_width: usize,
+    theme: Color,
+) -> Line<'static> {
+    let glyph = match setting.kind {
+        SettingKind::Text => "✎",
+        SettingKind::Toggle | SettingKind::Cycle => "◀",
+        SettingKind::Action => "!",
+    };
+    let label = format!(" {glyph} {}: ", setting.label);
+    let mut spans = vec![Span::styled(
+        label.clone(),
+        Style::default().fg(theme).bold(),
+    )];
+
+    if editing {
+        let value: Vec<char> = app.input.value().chars().collect();
+        let cursor = app.input.cursor().min(value.len());
+        let avail = inner_width.saturating_sub(label.chars().count()).max(8);
+        let start = (cursor + 1).saturating_sub(avail);
+        let end = (start + avail).min(value.len());
+        let before: String = value[start..cursor.min(end)].iter().collect();
+        let at: String = value
+            .get(cursor)
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| " ".into());
+        let after: String = value[(cursor + 1).min(end)..end].iter().collect();
+        let field_style = Style::default().fg(Color::Black).bg(Color::Yellow);
+        spans.push(Span::styled(before, field_style));
+        spans.push(Span::styled(
+            at,
+            Style::default().fg(Color::Black).bg(Color::White),
+        ));
+        spans.push(Span::styled(after, field_style));
+        return Line::from(spans);
+    }
+
+    let marker = match setting.kind {
+        SettingKind::Text => "  ✎",
+        SettingKind::Toggle | SettingKind::Cycle => "  ‹ ›",
+        SettingKind::Action => "  ⏎",
+    };
+    spans.push(Span::styled(
+        app.settings_value(setting.id),
+        Style::default().fg(Color::White),
+    ));
+    spans.push(Span::styled(marker, Style::default().fg(Color::DarkGray)));
+    let mut line = Line::from(spans);
+    if selected {
+        line = line.style(Style::default().bg(Color::Rgb(0, 40, 40)));
+    }
+    line
+}
+
 fn render_settings(f: &mut Frame, app: &mut App, area: Rect, editing: Option<usize>) {
     let (r, g, b) = app.config.theme_color;
     let theme = Color::Rgb(r, g, b);
     let chunks = Layout::default()
-        .constraints([Constraint::Min(0), Constraint::Length(3)])
+        .constraints([Constraint::Min(0), Constraint::Length(4)])
         .split(area);
+    let inner_width = chunks[0].width.saturating_sub(2) as usize;
 
-    let items: Vec<ListItem> = (0..SETTINGS_COUNT)
-        .map(|i| {
-            let label = SETTINGS_LABELS[i];
-            let val = app.settings_value(i);
-            let is_editing = editing == Some(i);
-            let display_val = if is_editing { &app.nav.edit_buf } else { &val };
-            let style = if is_editing {
-                Style::default().fg(Color::Black).bg(Color::Yellow)
-            } else {
-                Style::default().fg(Color::White)
-            };
-            let marker = match i {
-                2 | 4 | 5 | 7 | 8 => " [Enter: toggle]",
-                _ => " [Enter: edit]",
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("  {}: ", label), Style::default().fg(theme).bold()),
-                Span::styled(display_val.to_string(), style),
-                Span::styled(marker, Style::default().fg(Color::DarkGray)),
-            ]))
-        })
-        .collect();
+    let selected = app
+        .nav
+        .set_state
+        .selected()
+        .unwrap_or(0)
+        .min(SETTINGS.len().saturating_sub(1));
 
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .title(" ⚙  Settings ")
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(theme)),
-        )
-        .highlight_style(Style::default().bg(theme).fg(Color::Black).bold());
-    f.render_stateful_widget(list, chunks[0], &mut app.nav.set_state);
+    let mut lines: Vec<Line> = Vec::new();
+    let mut setting_lines = vec![0usize; SETTINGS.len()];
+    let mut last_section = "";
+    for (i, setting) in SETTINGS.iter().enumerate() {
+        if setting.section != last_section {
+            last_section = setting.section;
+            if i > 0 {
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(Span::styled(
+                format!(" {}", setting.section),
+                Style::default().fg(Color::DarkGray).bold(),
+            )));
+        }
+        setting_lines[i] = lines.len();
+        lines.push(setting_line(
+            app,
+            setting,
+            editing == Some(i),
+            i == selected,
+            inner_width,
+            theme,
+        ));
+    }
 
-    let hint = if editing.is_some() {
-        " Type to edit | Enter: save | ESC: cancel "
-    } else if let Some(msg) = &app.status_msg {
-        msg.as_str()
+    // Manual scroll: keep the selected row visible, then clamp to content.
+    let visible_h = (chunks[0].height.saturating_sub(2) as usize).max(1);
+    let selected_line = setting_lines[selected];
+    let mut offset = app.nav.set_offset;
+    if selected_line < offset {
+        offset = selected_line;
+    } else if selected_line >= offset + visible_h {
+        offset = selected_line + 1 - visible_h;
+    }
+    offset = offset.min(lines.len().saturating_sub(visible_h));
+    app.nav.set_offset = offset;
+    let end = (offset + visible_h).min(lines.len());
+
+    let title = if app.needs_source_update {
+        " ⚙  Settings — update pending "
     } else {
-        " Up/Down: navigate | Enter: edit/toggle | ESC: back "
+        " ⚙  Settings "
+    };
+    let list = Paragraph::new(lines[offset..end].to_vec()).block(
+        Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(theme)),
+    );
+    f.render_widget(list, chunks[0]);
+
+    let (hint, hint_color) = if let Some(err) = &app.setting_error {
+        (format!(" ✗ {err}"), Color::Red)
+    } else if editing.is_some() {
+        let lead = if app.input.is_fresh() {
+            " Paste replaces · "
+        } else {
+            " "
+        };
+        (
+            format!("{lead}←→ Home/End · Ctrl+U clear · Ctrl+T test · Enter save · Esc cancel"),
+            Color::DarkGray,
+        )
+    } else {
+        (
+            " ↑↓ navigate · ←→ adjust · Enter edit/toggle · T test sources · R reset · Esc back"
+                .to_string(),
+            Color::DarkGray,
+        )
+    };
+    let (status, status_color) = if let Some(msg) = &app.status_msg {
+        (msg.clone(), Color::Yellow)
+    } else if app.needs_source_update {
+        (
+            "⚠ sources changed — test with T, then run UPDATE".to_string(),
+            Color::Yellow,
+        )
+    } else if let Some(meta) = &app.cache_meta {
+        (
+            format!(
+                "Cache: {} channels · updated {}",
+                meta.channels,
+                human_age(Utc::now().timestamp(), meta.fetched_at)
+            ),
+            Color::DarkGray,
+        )
+    } else {
+        (String::new(), Color::DarkGray)
     };
     f.render_widget(
-        Paragraph::new(hint).block(
+        Paragraph::new(vec![
+            Line::from(Span::styled(hint, Style::default().fg(hint_color))),
+            Line::from(Span::styled(status, Style::default().fg(status_color))),
+        ])
+        .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(Color::DarkGray)),
         ),
         chunks[1],
+    );
+}
+
+/// Modal confirmation for destructive actions and full refreshes.
+fn render_confirm(f: &mut Frame, app: &App, area: Rect) {
+    let Some(confirm) = &app.confirm else {
+        return;
+    };
+    let width = area.width.saturating_sub(8).clamp(30, 70);
+    let height = 7.min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    f.render_widget(Clear, popup);
+    let text = format!(
+        "\n {}\n\n [Y/Enter] confirm      [Esc] cancel",
+        confirm.prompt
+    );
+    f.render_widget(
+        Paragraph::new(text)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true })
+            .block(
+                Block::default()
+                    .title(" Confirm ")
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(Color::Yellow)),
+            ),
+        popup,
     );
 }
 
@@ -1015,12 +1163,27 @@ fn render_main_menu(f: &mut Frame, app: &mut App, area: Rect, theme: Color) {
     };
     let chunks = Layout::default().constraints(constraints).split(area);
     let version = env!("CARGO_PKG_VERSION");
-    let status = format!(
+    let mut status = format!(
         "   NEON HUB v{}\n   Channels: {}  Radio: {}",
         version,
         app.data.channels.len(),
         app.data.radio.len()
     );
+    let now = Utc::now().timestamp();
+    if let Some(meta) = &app.cache_meta {
+        status.push_str(&format!(
+            "\n   Cache: {} ch, {} EPG · updated {}",
+            meta.channels,
+            meta.epg_channels,
+            human_age(now, meta.fetched_at)
+        ));
+        if let Some(w) = &meta.epg_warning {
+            status.push_str(&format!("\n   ⚠ {w}"));
+        }
+    }
+    if app.needs_source_update {
+        status.push_str("\n   ⚠ sources changed — UPDATE to apply");
+    }
     f.render_widget(
         Paragraph::new(status)
             .alignment(Alignment::Center)
@@ -1118,7 +1281,7 @@ fn render_chan_list(f: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .map(|&idx| {
             let ch = &app.data.channels[idx];
-            let is_fav = app.config.favorites.contains(&ch.url);
+            let is_fav = app.is_channel_favorite(idx);
             let has_archive = ch.catchup_days > 0;
             let mut spans: Vec<Span> = Vec::new();
             if is_fav {
@@ -1229,7 +1392,7 @@ fn render_radio_list(f: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .map(|&idx| {
             let st = &app.data.radio[idx];
-            let is_fav = app.config.favorites.contains(&st.stream);
+            let is_fav = app.config.favorites.contains(&crate::models::radio_key(st));
             let track = st.track.as_deref().unwrap_or("");
             let mut spans = Vec::new();
             if is_fav {
@@ -1273,9 +1436,9 @@ fn render_favorites(f: &mut Frame, app: &mut App, area: Rect, theme: Color) {
     let favs = app.sorted_favorites();
     let items: Vec<ListItem> = favs
         .iter()
-        .map(|url| {
-            let name = get_name_by_url(url, &app.data, &app.config);
-            ListItem::new(format!("  ⭐  {}", name)).style(Style::default().fg(theme))
+        .map(|key| {
+            ListItem::new(format!("  ⭐  {}", app.config.entry_name(key)))
+                .style(Style::default().fg(theme))
         })
         .collect();
     let list = List::new(items)
@@ -1297,9 +1460,9 @@ fn render_history(f: &mut Frame, app: &mut App, area: Rect, theme: Color) {
         .history
         .iter()
         .rev()
-        .map(|url| {
-            let name = get_name_by_url(url, &app.data, &app.config);
-            ListItem::new(format!("  🕐  {}", name)).style(Style::default().fg(theme))
+        .map(|key| {
+            ListItem::new(format!("  🕐  {}", app.config.entry_name(key)))
+                .style(Style::default().fg(theme))
         })
         .collect();
     let list = List::new(items)

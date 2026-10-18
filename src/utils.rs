@@ -53,9 +53,57 @@ pub fn parse_xml_time(s: &str) -> i64 {
     0
 }
 
+/// Mask credentials in a source URL for diagnostics output.
+///
+/// Tokens usually live in a long path segment (`/iptv/TOKEN/…`) or in the query
+/// string; both are replaced so `ip_tv-neon diag` can be pasted into a bug
+/// report without leaking access to the provider.
+pub fn mask_url(raw: &str) -> String {
+    let s = raw.trim();
+    if s.is_empty() {
+        return "(not set)".into();
+    }
+    if !s.contains("://") {
+        return s.to_string(); // local path — no credentials
+    }
+    let (base, has_query) = match s.split_once('?') {
+        Some((b, _)) => (b, true),
+        None => (s, false),
+    };
+    let mut out = String::new();
+    for (i, part) in base.split('/').enumerate() {
+        if i > 0 {
+            out.push('/');
+        }
+        if i < 3 || part.chars().count() <= 16 {
+            out.push_str(part);
+        } else {
+            out.push_str("***");
+        }
+    }
+    if has_query {
+        out.push_str("?***");
+    }
+    out
+}
+
+/// Compact relative age ("just now", "12m ago", "3h ago", "5d ago").
+pub fn human_age(now: i64, then: i64) -> String {
+    if then <= 0 {
+        return "never".into();
+    }
+    let secs = (now - then).max(0);
+    match secs {
+        0..=59 => "just now".into(),
+        60..=3599 => format!("{}m ago", secs / 60),
+        3600..=86_399 => format!("{}h ago", secs / 3600),
+        _ => format!("{}d ago", secs / 86_400),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_xml_time;
+    use super::{human_age, mask_url, parse_xml_time};
     use chrono::{DateTime, NaiveDateTime};
 
     #[test]
@@ -100,5 +148,30 @@ mod tests {
     #[test]
     fn trims_whitespace() {
         assert!(parse_xml_time("  20240115123000  ") > 0);
+    }
+
+    #[test]
+    fn masks_token_path_and_query() {
+        assert_eq!(
+            mask_url("http://provider.example/iptv/SUPERSECRETTOKEN123/204/index.m3u8?token=abc"),
+            "http://provider.example/iptv/***/204/index.m3u8?***"
+        );
+        assert_eq!(
+            mask_url("http://127.0.0.1:8095/neon.m3u"),
+            "http://127.0.0.1:8095/neon.m3u"
+        );
+        assert_eq!(mask_url(""), "(not set)");
+        assert_eq!(mask_url("/home/admin/list.m3u"), "/home/admin/list.m3u");
+    }
+
+    #[test]
+    fn human_age_buckets() {
+        let now = 1_000_000;
+        assert_eq!(human_age(now, 0), "never");
+        assert_eq!(human_age(now, now - 5), "just now");
+        assert_eq!(human_age(now, now - 120), "2m ago");
+        assert_eq!(human_age(now, now - 7200), "2h ago");
+        assert_eq!(human_age(now, now - 2 * 86_400), "2d ago");
+        assert_eq!(human_age(now, now + 100), "just now");
     }
 }

@@ -17,13 +17,21 @@ fn config_save_load_roundtrip() {
         history: vec!["http://hist1.com".into(), "http://hist2.com".into()],
         channel_names: {
             let mut m = HashMap::new();
-            m.insert("http://ch1.com".into(), "Channel One".into());
+            m.insert("id:ch1".into(), "Channel One".into());
             m
         },
+        entry_urls: {
+            let mut m = HashMap::new();
+            m.insert("id:ch1".into(), "http://ch1.com".into());
+            m
+        },
+        entry_schema: 2,
         video_fullscreen: true,
         video_geometry: "1920x1080".into(),
         local_dir: String::new(),
         llm_provider: "deepseek".into(),
+        last_mtime: None,
+        config_path: None,
     };
 
     let json = serde_json::to_string_pretty(&original).expect("serialize");
@@ -35,6 +43,8 @@ fn config_save_load_roundtrip() {
     assert_eq!(original.favorites, restored.favorites);
     assert_eq!(original.history, restored.history);
     assert_eq!(original.channel_names, restored.channel_names);
+    assert_eq!(original.entry_urls, restored.entry_urls);
+    assert_eq!(original.entry_schema, restored.entry_schema);
     assert_eq!(original.video_fullscreen, restored.video_fullscreen);
     assert_eq!(original.video_geometry, restored.video_geometry);
     assert_eq!(original.llm_provider, restored.llm_provider);
@@ -76,6 +86,26 @@ fn corrupt_config_is_backed_up_before_default() {
         "corrupt config must be moved out of the way"
     );
     assert_eq!(std::fs::read(&bak).unwrap(), b"{ this is not valid json ]");
+}
+
+#[test]
+fn partial_config_keeps_working_with_defaults() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.json");
+    // Only the playlist URL is present — every other key must default instead
+    // of making the whole config "corrupt".
+    std::fs::write(&path, r#"{"playlist_url":"http://h/l.m3u"}"#).expect("write");
+
+    let cfg = Config::load_from(&path);
+
+    assert_eq!(cfg.playlist_url, "http://h/l.m3u");
+    assert_eq!(cfg.epg_url, ip_tv_neon::consts::RECOMMENDED_EPG);
+    assert_eq!(cfg.theme_color, (0, 255, 255));
+    assert!(cfg.video_fullscreen);
+    assert!(
+        !path.with_extension("json.bak").exists(),
+        "a partial (but valid) config must not be treated as corrupt"
+    );
 }
 
 #[test]

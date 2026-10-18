@@ -1,7 +1,10 @@
 // ─── Imports ─────────────────────────────────────────────────────────────────
 
 use crate::consts::*;
-use crate::models::{AppData, CacheContainer, Channel, Config, EpgProgram, RadioStation};
+use crate::models::{
+    AppData, CacheContainer, CacheMeta, Channel, Config, EpgProgram, RadioStation,
+};
+use crate::settings::{expand_tilde, is_http_source};
 use crate::utils::{main_log, normalize, parse_xml_time, sanitize_terminal};
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -43,9 +46,104 @@ async fn read_body_capped(mut resp: reqwest::Response, cap: usize, what: &str) -
     Ok(buf)
 }
 
+// ─── Source Probe (Settings "test sources") ──────────────────────────────────
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceKind {
+    Playlist,
+    Epg,
+}
+
+/// Fetch just enough of a source to tell the user whether it is usable, before
+/// the value is saved into the config. Returns a one-line human summary.
+pub async fn probe_source(
+    client: &reqwest::Client,
+    url: &str,
+    kind: SourceKind,
+) -> Result<String, String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err("empty".into());
+    }
+
+    // Local playlists are a supported playlist source; check the file itself.
+    if kind == SourceKind::Playlist && !trimmed.contains("://") {
+        let path = expand_tilde(trimmed);
+        let bytes = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
+        let head = String::from_utf8_lossy(&bytes[..bytes.len().min(64 * 1024)]).into_owned();
+        validate_playlist_body(&head).map_err(|e| e.to_string())?;
+        return Ok(format!("OK — local file, {} bytes", bytes.len()));
+    }
+
+    if !is_http_source(trimmed) {
+        return Err("not an http(s) URL".into());
+    }
+
+    let resp = client
+        .get(trimmed)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("HTTP {status}"));
+    }
+    if let Some(ct) = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        && ct.to_ascii_lowercase().contains("html")
+    {
+        return Err(format!("returned {ct:?} — a web page, not a source"));
+    }
+
+    let body = read_prefix(resp, 64 * 1024)
+        .await
+        .map_err(|e| format!("read failed: {e}"))?;
+    match kind {
+        SourceKind::Playlist => {
+            let text = String::from_utf8_lossy(&body).into_owned();
+            validate_playlist_body(&text).map_err(|e| e.to_string())?;
+        }
+        SourceKind::Epg => {
+            let gz = body.starts_with(&[0x1f, 0x8b]);
+            let looks_xml =
+                gz || body.windows(3).any(|w| w == b"<tv") || body.starts_with(b"<?xml");
+            if !looks_xml {
+                return Err("not XMLTV (neither gzip nor an XML document)".into());
+            }
+        }
+    }
+    Ok(format!(
+        "OK — HTTP {status}, {} KiB sampled",
+        body.len() / 1024
+    ))
+}
+
+/// Read at most `cap` bytes from a response body (probe only — never buffered
+/// past the cap, unlike `read_body_capped` which rejects oversized bodies).
+async fn read_prefix(mut resp: reqwest::Response, cap: usize) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    while buf.len() < cap
+        && let Some(chunk) = resp.chunk().await.context("probe: reading body")?
+    {
+        buf.extend_from_slice(&chunk[..chunk.len().min(cap - buf.len())]);
+    }
+    Ok(buf)
+}
+
 // ─── Data Update (Radio + M3U + EPG) ─────────────────────────────────────────
 
-pub async fn update_data(config: &Config, client: &reqwest::Client) -> Result<()> {
+/// What one update actually produced, so the UI can report partial failure
+/// (e.g. playlist fine, EPG 404) instead of a blanket "Updated".
+pub struct UpdateReport {
+    pub channels: usize,
+    pub radio: usize,
+    pub epg_channels: usize,
+    pub warning: Option<String>,
+}
+
+pub async fn update_data(config: &Config, client: &reqwest::Client) -> Result<UpdateReport> {
     main_log("Starting update_data...");
 
     let tracks_map = fetch_radio_now(client).await;
@@ -65,11 +163,18 @@ pub async fn update_data(config: &Config, client: &reqwest::Client) -> Result<()
         *group_counts.entry(ch.group.clone()).or_insert(0) += 1;
     }
 
-    let (mut epg, name_to_id) = fetch_epg_data(client, config).await;
+    let (mut epg, name_to_id, epg_warning) = fetch_epg_data(client, config).await;
 
     for progs in epg.values_mut() {
         progs.sort_by_key(|p| p.start);
     }
+
+    let report = UpdateReport {
+        channels: channels.len(),
+        radio: radio.len(),
+        epg_channels: epg.len(),
+        warning: epg_warning.clone(),
+    };
 
     let data = AppData {
         channels,
@@ -83,7 +188,19 @@ pub async fn update_data(config: &Config, client: &reqwest::Client) -> Result<()
     };
 
     save_data(data)?;
-    Ok(())
+
+    let meta = CacheMeta {
+        playlist_url: config.playlist_url.trim().to_string(),
+        epg_url: config.epg_url.trim().to_string(),
+        fetched_at: Utc::now().timestamp(),
+        channels: report.channels,
+        epg_channels: report.epg_channels,
+        epg_warning,
+    };
+    if let Err(e) = meta.save() {
+        main_log(&format!("[cache] failed to write cache metadata: {e}"));
+    }
+    Ok(report)
 }
 
 /// Fetch radio stations from API and local files
@@ -233,9 +350,15 @@ fn validate_playlist_body(body: &str) -> Result<()> {
 
 /// Fetch and parse the main IPTV playlist
 async fn fetch_playlist(client: &reqwest::Client, config: &Config) -> Result<Vec<Channel>> {
-    let m3u = if config.playlist_url.starts_with("http") {
+    let source = config.playlist_url.trim();
+    if source.is_empty() {
+        anyhow::bail!(
+            "Playlist URL is not set — open Settings → Playlist URL (or set \"playlist_url\" in config.json), then update again"
+        );
+    }
+    let m3u = if is_http_source(source) {
         let resp = client
-            .get(&config.playlist_url)
+            .get(source)
             .send()
             .await
             .context("Failed to fetch playlist")?;
@@ -260,11 +383,19 @@ async fn fetch_playlist(client: &reqwest::Client, config: &Config) -> Result<Vec
         validate_playlist_body(&body)?;
         body
     } else {
-        let path = config.playlist_url.clone();
-        let body = tokio::task::spawn_blocking(move || fs::read_to_string(&path))
-            .await
-            .map_err(|e| anyhow::anyhow!("spawn_blocking join: {e}"))?
-            .context("Failed to read local playlist")?;
+        if source.contains("://") {
+            anyhow::bail!(
+                "Playlist source {source:?} uses an unsupported scheme — only http://, https:// or a local file path"
+            );
+        }
+        let path = expand_tilde(source);
+        let body = tokio::task::spawn_blocking({
+            let path = path.clone();
+            move || fs::read_to_string(&path)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking join: {e}"))?
+        .with_context(|| format!("Failed to read local playlist {path}"))?;
         validate_playlist_body(&body)?;
         body
     };
@@ -276,27 +407,70 @@ async fn fetch_playlist(client: &reqwest::Client, config: &Config) -> Result<Vec
 async fn fetch_epg_data(
     client: &reqwest::Client,
     config: &Config,
-) -> (HashMap<String, Vec<EpgProgram>>, HashMap<String, String>) {
+) -> (
+    HashMap<String, Vec<EpgProgram>>,
+    HashMap<String, String>,
+    Option<String>,
+) {
     let mut epg: HashMap<String, Vec<EpgProgram>> = HashMap::new();
     let mut name_to_id: HashMap<String, String> = HashMap::new();
+    let url = config.epg_url.trim().to_string();
+    if url.is_empty() {
+        return (epg, name_to_id, Some("EPG: URL is not set".into()));
+    }
+    if !is_http_source(&url) {
+        return (
+            epg,
+            name_to_id,
+            Some("EPG: URL is not http(s); guide skipped".into()),
+        );
+    }
 
-    match client.get(&config.epg_url).send().await {
+    let warning = match client.get(&url).send().await {
+        Ok(r) if !r.status().is_success() => {
+            let msg = format!("EPG: HTTP {} — guide unavailable", r.status());
+            main_log(&format!("[epg] {msg} ({url})"));
+            Some(msg)
+        }
+        Ok(r)
+            if r.headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|ct| ct.to_ascii_lowercase().contains("html")) =>
+        {
+            let msg = "EPG: source returned a web page, not XMLTV".to_string();
+            main_log(&format!("[epg] {msg} ({url})"));
+            Some(msg)
+        }
         Ok(r) => match read_body_capped(r, MAX_EPG_DOWNLOAD_BYTES, "EPG").await {
             Ok(b) => {
-                let epg_url_is_gz = config.epg_url.ends_with(".gz");
+                // `parse_epg` sniffs the gzip magic bytes itself; the suffix is
+                // only a hint (CDNs serve `.xml` gzipped and vice versa).
+                let epg_url_is_gz = url.ends_with(".gz");
                 let (parsed_epg, parsed_name_to_id) =
                     tokio::task::spawn_blocking(move || parse_epg(&b, epg_url_is_gz))
                         .await
                         .unwrap_or_default();
                 epg = parsed_epg;
                 name_to_id = parsed_name_to_id;
+                if epg.is_empty() {
+                    Some("EPG: source contained no programmes".into())
+                } else {
+                    None
+                }
             }
-            Err(e) => main_log(&format!("[epg] download rejected: {e}")),
+            Err(e) => {
+                main_log(&format!("[epg] download rejected: {e}"));
+                Some(format!("EPG: download rejected ({e})"))
+            }
         },
-        Err(e) => main_log(&format!("[epg] fetch failed: {e}")),
-    }
+        Err(e) => {
+            main_log(&format!("[epg] fetch failed: {e}"));
+            Some(format!("EPG: request failed ({e})"))
+        }
+    };
 
-    (epg, name_to_id)
+    (epg, name_to_id, warning)
 }
 // ─── M3U Playlist Parser ──────────────────────────────────────────────────────
 
